@@ -1,0 +1,1067 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>物体/顔検出 + 手動トラッカ（YOLOv11 / ONNX / iPad）</title>
+<style>
+  :root{--card:#fff;--ink:#222;--pill:#edf2ff;--pill-b:#cdd8ff}
+  body{margin:0;background:#eef5ff;color:var(--ink);font:16px/1.6 "M PLUS Rounded 1c",-apple-system,system-ui}
+  header{position:sticky;top:0;z-index:10;background:var(--card);padding:10px 12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;box-shadow:0 2px 4px rgba(0,0,0,.08)}
+  button,select,label{font-size:16px}
+  button{background:#4da6ff;color:#fff;border:none;border-radius:10px;padding:8px 12px;cursor:pointer}
+  button:hover{background:#3385ff} button:disabled{opacity:.6;cursor:not-allowed}
+  .pill{padding:2px 8px;border-radius:999px;background:var(--pill);border:1px solid var(--pill-b)}
+  /* レイアウト */
+  #wrap{max-width:1200px;margin:12px auto;padding:0 10px;display:grid;grid-template-columns:1fr 260px;gap:12px}
+  @media (max-width:980px){ #wrap{grid-template-columns:1fr} }
+  #stage{position:relative}
+  #stage video{display:none}
+  #stage canvas#view{width:100%;display:block;background:#000;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.1);touch-action:none}
+  #detectedBar{position:absolute;right:12px;top:12px;display:flex;gap:6px;flex-wrap:wrap;max-width:60%;pointer-events:none}
+  .chip{background:#ffffffd0;color:#333;border:1px solid var(--pill-b);border-radius:999px;padding:2px 8px;font-size:14px}
+  /* サイドパネル（テンプレート表示） */
+  #side{background:var(--card);border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.08);padding:10px}
+  #side h3{margin:4px 0 8px;font-size:16px}
+  #tplBox{background:#f7f9ff;border:1px dashed #c8d3ff;border-radius:10px;display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;max-width:100%}
+  #tplThumb{max-width:100%;width:100%;height:auto;image-rendering:pixelated}
+  .meta{font-size:13px;color:#555;margin-top:6px}
+  #chart{margin:8px auto 16px;display:block;background:#fff;border-radius:12px;max-width:1200px}
+  #status{max-width:1200px;margin:0 auto 12px;color:#444;font-size:14px;padding:0 10px}
+</style>
+
+<!-- onnxruntime-web：Safari 安定化（単一スレッドWASM） -->
+<script>
+  window.ort = window.ort || {};
+  ort.env = ort.env || {};
+  ort.env.wasm = ort.env.wasm || {};
+  ort.env.wasm.numThreads = 1;   // iPad/Safariでの安定運用
+  ort.env.wasm.proxy = false;
+  ort.env.wasm.simd = true;
+  ort.env.logLevel = 'warning';
+</script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+
+<header>
+  <button id="start">▶ カメラ開始</button>
+  <button id="pause" disabled>⏸ 一時停止</button>
+  <button id="reset" disabled>🗑 グラフ初期化</button>
+  <button id="download" disabled>⬇ CSV保存</button>
+
+  <label>モード:
+    <select id="mode" disabled>
+      <option value="coco11">物体（YOLOv11, COCO80）</option>
+      <option value="yolo-face">顔（YOLOv8-face）</option>
+      <option value="device-face">顔（Device）</option>
+      <option value="template">手動トラッカ（テンプレート）</option>
+      </select>
+    </label>
+
+  <label>クラス:
+    <select id="cls" disabled></select>
+  </label>
+
+  <label>対象ID:
+    <select id="idSel" disabled>
+      <option value="auto">auto（代表1体）</option>
+      </select>
+    </label>
+
+  <label><input type="checkbox" id="rec" disabled> この対象だけ記録</label>
+
+  <span id="boxInfo" class="pill">box: –</span>
+    <span class="pill">映像FPS:<b id="vfps">0</b> / 推論FPS:<b id="ifps">0</b></span>
+</header>
+
+<div id="wrap">
+<div id="stage">
+  <video id="vid" playsinline muted></video>
+  <canvas id="view"></canvas>
+    <div id="detectedBar"></div>
+  </div>
+
+  <!-- テンプレートプレビュー -->
+  <aside id="side">
+    <h3>テンプレート</h3>
+    <div id="tplBox">
+      <canvas id="tplThumb" width="240" height="180"></canvas>
+    </div>
+    <div class="meta">
+      <div>サイズ: <span id="tplSize">–</span></div>
+      <div>追跡スコア: <span id="tplScore">–</span></div>
+      <div>ヒント: 手動トラッカでドラッグ、または検出ボックスをクリックで登録</div>
+    </div>
+    <details open>
+      <summary>🔧 追跡パラメータ（授業向け簡単調整）</summary>  
+        <div class="row">
+          <label>保持閾値（NCC）</label>
+          <span><output id="oKeep">0.45</output></span>
+          <input id="pKeep" type="range" min="0.1" max="0.9" step="0.01" value="0.45">
+        </div>
+        <div class="row">
+          <label>テンプレ更新閾値（NCC）</label>
+          <span><output id="oUpd">0.80</output></span>
+          <input id="pUpd" type="range" min="0.6" max="0.95" step="0.01" value="0.80">
+        </div>
+        <div class="row">
+          <label>見失い判定フレーム</label>
+          <span><output id="oLost">18</output></span>
+          <input id="pLost" type="range" min="6" max="60" step="1" value="18">
+        </div>
+        <div class="row">
+          <label>探索半径倍率</label>
+          <span><output id="oRad">1.80</output></span>
+          <input id="pRad" type="range" min="0.8" max="3.0" step="0.05" value="1.8">
+        </div>
+        <div class="row">
+          <label>Kalman Q（運動ノイズ）</label>
+          <span><output id="oQ">3.0</output></span>
+          <input id="pQ" type="range" min="0.5" max="10" step="0.1" value="3.0">
+        </div>
+        <div class="row">
+          <label>Kalman R（観測ノイズ）</label>
+          <span><output id="oR">6.0</output></span>
+          <input id="pR" type="range" min="0.5" max="20" step="0.5" value="6.0">
+        </div>
+        <div class="row">
+          <label><input id="pUseKalman" type="checkbox" checked> Kalmanフィルタを使用</label>
+        </div>    
+        <div class="row">
+          <label>再取得距離（px）</label>
+          <span><output id="oRec">120</output></span>
+          <input id="pRec" type="range" min="40" max="300" step="5" value="120">
+        </div>
+        <div class="row">
+          <label>スケール列</label>
+          <input id="pScales" type="text" value="0.9,1.0,1.1">
+        </div>
+    </details>
+  </aside>
+</div>
+
+<canvas id="chart" height="280"></canvas>
+<div id="status"></div>
+
+<script>
+/* ===== モデル/閾値 ===== */
+const COCO11_MODEL_PATH = './yolo11n.onnx';       // Ultralytics YOLOv11n ONNX (float32)
+const FACE_MODEL_PATH   = './yolov8n-face.onnx';  // 使う場合のみ同フォルダに置く
+const IN_SIZE  = 256;
+const SCORE_TH = 0.50, NMS_IOU = 0.45, MAX_DET = 20;
+
+/* ===== COCO80 ===== */
+const COCO80=["person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"];
+
+/* ===== DOM ===== */
+const vid = document.getElementById('vid');
+const view = document.getElementById('view');
+const vctx = view.getContext('2d', { willReadFrequently:true });
+
+const startBtn = document.getElementById('start');
+const pauseBtn = document.getElementById('pause');
+const resetBtn = document.getElementById('reset');
+const dlBtn    = document.getElementById('download');
+
+const modeSel = document.getElementById('mode');
+const clsSel  = document.getElementById('cls');
+const idSel   = document.getElementById('idSel');
+const recChk  = document.getElementById('rec');
+
+const vfpsEl = document.getElementById('vfps');
+const ifpsEl = document.getElementById('ifps');
+const boxInfo= document.getElementById('boxInfo');
+const chart  = document.getElementById('chart');
+const cctx   = chart.getContext('2d');
+const status = document.getElementById('status');
+const detectedBar = document.getElementById('detectedBar');
+
+const tplThumb = document.getElementById('tplThumb');
+const tplCtx   = tplThumb.getContext('2d');
+/* ▼▼ スライダ値（いつでも変更可能） */
+const P = {
+  keep: 0.45,
+  update: 0.80,
+  lostFrames: 18,
+  radiusMul: 1.8,
+  kQ: 3.0,
+  kR: 6.0,
+  reacquireDist: 120,
+  scales: [0.9, 1.0, 1.1],
+  useKalman: true
+};
+// UI バインド
+(function(){
+  const bind=(id,out,key,fmt=v=>v)=>{ const el=document.getElementById(id), oo=document.getElementById(out);
+    const set=()=>{ P[key]=el.type==='range'? +el.value : el.value;
+      oo&&(oo.value=(el.type==='range'? (+el.value).toFixed(el.step.includes('.')?2:0):el.value));
+      if(key==='scales'){ P.scales = el.value.split(',').map(s=>+s.trim()).filter(v=>v>0); }
+    };
+    set(); el.addEventListener('input', set);
+  };
+  bind('pKeep','oKeep','keep');
+  bind('pUpd','oUpd','update');
+  bind('pLost','oLost','lostFrames');
+  bind('pRad','oRad','radiusMul');
+  bind('pQ','oQ','kQ');
+  bind('pR','oR','kR');
+  document.getElementById('pRec').addEventListener('input', e=>{
+    P.reacquireDist=+e.target.value; document.getElementById('oRec').value=P.reacquireDist;
+  });
+  document.getElementById('pScales').addEventListener('change', e=>{
+    P.scales=e.target.value.split(',').map(s=>+s.trim());
+  });
+})();
+
+// Kalman ON/OFF のUIバインド
+const useKalmanEl = document.getElementById('pUseKalman');
+if (useKalmanEl) {
+  P.useKalman = useKalmanEl.checked;
+  useKalmanEl.addEventListener('change', (e)=> {
+    P.useKalman = e.target.checked;
+  });
+}
+
+const tplSizeEl= document.getElementById('tplSize');
+const tplScoreEl=document.getElementById('tplScore');
+
+/* ===== 状態 ===== */
+let W=640, H=360;
+let running=false, paused=false;
+let coco11Session=null, faceSession=null;
+let wantClass='*', wantId='auto';
+let series=[], records=[];
+let vCount=0,lastV=performance.now(), iCount=0,lastI=performance.now();
+let faceDetector = null;
+if ('FaceDetector' in window) { try { faceDetector = new FaceDetector({ fastMode:true, maxDetectedFaces:10 }); } catch{} }
+
+/* カメラ管理 */
+let camWatch = null;
+let lastVideoTime = 0;
+let camStream = null;
+
+/* rAF/推論 */
+let lastBoxes = [];
+let lastTgt   = null;
+let inferTimer = null;
+
+/* ===== カメラ：開始/停止/再起動 + ウォッチドッグ ===== */
+async function openCamera(){
+  view.width=W; view.height=H;
+  camStream = await navigator.mediaDevices.getUserMedia({
+    video:{width:{ideal:W},height:{ideal:H},frameRate:{ideal:30,max:30},facingMode:'environment'},
+    audio:false
+  });
+  const track = camStream.getVideoTracks()[0];
+  track.onended = ()=>{ console.warn('camera track ended → restart'); restartCamera(); };
+  track.onmute  = ()=>{ console.warn('camera muted → restart'); restartCamera(); };
+  track.onunmute= ()=>{ console.log('camera unmuted'); };
+
+  vid.srcObject = camStream;
+  await vid.play();
+
+  if(camWatch) clearInterval(camWatch);
+  lastVideoTime = vid.currentTime;
+  camWatch = setInterval(()=>{
+    const stalled = (vid.readyState < 2) || (vid.currentTime === lastVideoTime);
+    if(stalled){
+      console.warn('camera stalled → restart');
+      restartCamera();
+    }
+    lastVideoTime = vid.currentTime;
+  }, 5000);
+}
+function stopCamera(){
+  try{
+    if(camWatch){ clearInterval(camWatch); camWatch=null; }
+    if(vid) { try{ vid.pause(); }catch{} vid.srcObject = null; }
+    if(camStream){
+      camStream.getTracks().forEach(t=>t.stop());
+      camStream=null;
+    }
+  }catch(e){ console.warn('stopCamera warn:', e); }
+}
+async function restartCamera(){
+  stopCamera();
+  try{ await openCamera(); }
+  catch(e){ console.error('restartCamera failed:', e); status.textContent = 'カメラ再起動に失敗: ' + (e.message||e); }
+}
+/* タブ切替での安全化 */
+document.addEventListener('visibilitychange', async ()=>{
+  if(!running) return;
+  if(document.hidden){ stopCamera(); }
+  else { await restartCamera(); }
+});
+
+/* ===== クラス/IDセレクタ ===== */
+function buildClassSelectFor(mode){
+  clsSel.innerHTML='';
+  const any=document.createElement('option'); any.value='*'; any.textContent='Any（全部）'; clsSel.appendChild(any);
+  if(mode==='coco11'){
+    COCO80.forEach((n,i)=>{const o=document.createElement('option'); o.value=String(i); o.textContent=`${i}: ${n}`; clsSel.appendChild(o);});
+  }else if(mode==='yolo-face'){
+    const o=document.createElement('option'); o.value='face-yolo'; o.textContent='face（YOLO）'; clsSel.appendChild(o);
+  }else if(mode==='device-face'){
+    const o=document.createElement('option'); o.value='face-device'; o.textContent='face（Device）'; clsSel.appendChild(o);
+  }else if(mode==='template'){
+    const o=document.createElement('option'); o.value='template'; o.textContent='template（手動）'; clsSel.appendChild(o);
+  }
+  clsSel.value = (mode==='coco11') ? '*' : (mode==='yolo-face' ? 'face-yolo' : (mode==='device-face' ? 'face-device' : 'template'));
+  wantClass = clsSel.value;
+}
+function updateIdSelector(currentBoxes){
+  if(modeSel.value==='template'){ idSel.innerHTML='<option value="auto">auto（#1固定）</option>'; idSel.value='auto'; wantId='auto'; return; }
+  const prev = wantId;
+  const ids = [];
+  currentBoxes.forEach(b=>{
+    if (wantClass==='*' ||
+        (wantClass==='face-yolo' && b.cls==='face-yolo') ||
+        (wantClass==='face-device' && b.cls==='face-device') ||
+        (typeof b.cls==='number' && wantClass===String(b.cls))) {
+      ids.push(b.id);
+    }
+  });
+  const uniq = Array.from(new Set(ids)).sort((a,b)=>a-b);
+  const options = ['<option value="auto">auto（代表1体）</option>'];
+  uniq.forEach(id=> options.push(`<option value="${id}">#${id}</option>`));
+  if (prev!=='auto' && !uniq.includes(Number(prev))) options.push(`<option value="${prev}">#${prev}（不在）</option>`);
+  const html = options.join('');
+  if (idSel.innerHTML !== html) idSel.innerHTML = html;
+  idSel.value = [...idSel.options].some(o=>o.value===prev) ? prev : 'auto';
+  wantId = idSel.value;
+}
+modeSel.addEventListener('change', ()=>{
+  buildClassSelectFor(modeSel.value);
+  tracker.reset(); tpl.clear();
+  idSel.innerHTML = '<option value="auto">auto（#1固定）</option>';
+  wantId='auto'; lastBoxes=[]; lastTgt=null;
+  status.textContent = (modeSel.value==='template')
+    ? 'キャンバス上をドラッグして追跡したい領域を切り出してください'
+    : '';
+});
+clsSel.addEventListener('change', ()=>{ wantClass = clsSel.value; wantId='auto'; idSel.value='auto'; });
+idSel.addEventListener('change', ()=>{ wantId = idSel.value; });
+
+/* ===== FPS（映像） ===== */
+function meterVideo(){
+  if('requestVideoFrameCallback' in HTMLVideoElement.prototype){
+    const onF=()=>{
+      vCount++; const now=performance.now();
+      if(now-lastV>1000){ vfpsEl.textContent=(vCount*1000/(now-lastV)).toFixed(0); vCount=0; lastV=now; }
+      vid.requestVideoFrameCallback(onF);
+    };
+    vid.requestVideoFrameCallback(onF);
+  }
+}
+
+/* ===== グラフ ===== */
+function pushData(x,y){ const t=(performance.now()/1000).toFixed(2); series.push({t:+t,x,y}); if(series.length>1200) series.shift(); }
+function resetData(){ series=[]; records=[]; }
+function drawNiceChart(){
+  const canvasWidth = view.getBoundingClientRect().width;
+  chart.style.width = canvasWidth + 'px';
+  const w=chart.width = Math.max(480, canvasWidth);
+  const h=chart.height;
+  cctx.clearRect(0,0,w,h);
+  const L=64,R=24,T=24,B=64, MAX_SEC=10;
+  const now = paused && series.length ? series[series.length-1].t : performance.now()/1000;
+  const tMin = now - MAX_SEC, tMax = now;
+
+  cctx.strokeStyle='#e8ecff';
+  for(let i=0;i<=10;i++){ const x=L+(w-L-R)*i/10; cctx.beginPath(); cctx.moveTo(x,T); cctx.lineTo(x,h-B); cctx.stroke(); }
+  const maxPixels=Math.max(W,H);
+  const step=Math.max(20, Math.ceil(maxPixels/6/50)*50);
+  for(let i=0;i<=maxPixels;i+=step){ const y=T+(h-T-B)*(1-i/maxPixels); cctx.beginPath(); cctx.moveTo(L,y); cctx.lineTo(w-R,y); cctx.stroke(); }
+  cctx.strokeStyle='#c5d1ff'; cctx.lineWidth=1.5; cctx.strokeRect(L,T,w-L-R,h-T-B);
+  cctx.fillStyle='#334'; cctx.font='13px -apple-system,system-ui';
+  for(let i=0;i<=10;i++){ const x=L+(w-L-R)*i/10; const time=(tMin + (tMax-tMin)*i/10).toFixed(1); cctx.fillText(time, x-14, h-22); }
+  for(let i=0;i<=maxPixels;i+=step){ const y=T+(h-T-B)*(1-i/maxPixels); cctx.fillText(String(i), L-38, y+4); }
+  cctx.font='14px -apple-system,system-ui';
+  cctx.fillText('時間 (秒)', w/2-28, h-8);
+  cctx.save(); cctx.translate(18, h/2+24); cctx.rotate(-Math.PI/2); cctx.fillText('画素座標 (x=青 / y=黄)', 0, 0); cctx.restore();
+
+  if(series.length>=2){
+    const recent=series.filter(p=>p.t>=tMin);
+    if(recent.length>=2){
+      const xS=t=>L+(w-L-R)*(t-tMin)/(tMax-tMin);
+    const ySX=v=>T+(h-T-B)*(1 - v/W);
+      const ySY=v=>T+(h-T-B)*(1 - v/H);
+      cctx.beginPath(); cctx.lineWidth=3; cctx.strokeStyle='#0a68ff';
+      recent.forEach((p,i)=>{const X=xS(p.t),Y=ySX(p.x); if(i==0)cctx.moveTo(X,Y); else cctx.lineTo(X,Y);}); cctx.stroke();
+      cctx.fillStyle='#0a68ff';
+      for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){const X=xS(recent[i].t),Y=ySX(recent[i].x); cctx.beginPath(); cctx.arc(X,Y,2.5,0,2*Math.PI); cctx.fill();}
+      cctx.beginPath(); cctx.setLineDash([6,6]); cctx.lineWidth=3; cctx.strokeStyle='#f6a000';
+      recent.forEach((p,i)=>{const X=xS(p.t),Y=ySY(p.y); if(i==0)cctx.moveTo(X,Y); else cctx.lineTo(X,Y);}); cctx.stroke(); cctx.setLineDash([]);
+      cctx.fillStyle='#f6a000';
+      for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){const X=xS(recent[i].t),Y=ySY(recent[i].y); cctx.fillRect(X-2,Y-2,4,4);}
+    }
+  }
+}
+
+/* ===== 前処理/YOLO/NMS ===== */
+const prepCanvas=document.createElement('canvas');
+const prepCtx    =prepCanvas.getContext('2d');
+function preprocess(canvas,W,H,s=IN_SIZE){
+  prepCanvas.width=s; prepCanvas.height=s;
+  const scale=Math.min(s/W,s/H);
+  const nw=Math.round(W*scale), nh=Math.round(H*scale);
+  const dx=Math.floor((s-nw)/2), dy=Math.floor((s-nh)/2);
+  prepCtx.fillStyle='black'; prepCtx.fillRect(0,0,s,s);
+  prepCtx.drawImage(canvas,0,0,W,H,dx,dy,nw,nh);
+  const rgba=prepCtx.getImageData(0,0,s,s).data;
+  const input=new Float32Array(1*3*s*s); const s2=s*s;
+  for(let i=0;i<s2;i++){ input[i]=rgba[i*4]/255; input[i+s2]=rgba[i*4+1]/255; input[i+2*s2]=rgba[i*4+2]/255; }
+  return { tensor:new ort.Tensor('float32',input,[1,3,s,s]), meta:{s,dx,dy,scale} };
+}
+function parseYolo(out){
+  const key=Object.keys(out)[0]; const arr=out[key]; let data=arr.data, dims=arr.dims;
+  if(dims.length===3 && dims[1]<dims[2]){const C=dims[1],N=dims[2],t=new Float32Array(N*C);for(let c=0;c<C;c++)for(let n=0;n<N;n++)t[n*C+c]=data[c*N+n];return {data:t,N,C};}
+  if(dims.length===3 && dims[1]>dims[2]) return {data,N:dims[1],C:dims[2]};
+  if(dims.length===2) return {data,N:dims[0],C:dims[1]};
+  return {data,N:Math.floor(data.length/84),C:84};
+}
+function iou(a,b){const x1=Math.max(a.x,b.x),y1=Math.max(a.y,b.y);const x2=Math.min(a.x+a.w,b.x+b.w),y2=Math.min(a.y+a.h,b.y+b.h);const inter=Math.max(0,x2-x1)*Math.max(0,y2-y1);const uni=a.w*a.h+b.w*b.h-inter+1e-6;return inter/uni;}
+function nms(d,th=0.45,max=MAX_DET){d.sort((a,b)=>b.score-a.score);const p=[];while(d.length){const a=d.shift();p.push(a);for(let i=d.length-1;i>=0;i--) if(iou(a,d[i])>th) d.splice(i,1);if(p.length>=max) break;}return p;}
+
+const sigmoid = x => 1 / (1 + Math.exp(-x));
+
+
+/* ===== 簡易トラッカ（ID付与） ===== */
+const tracker = {
+  nextId: 1, tracks: new Map(),
+  reset(){ this.nextId=1; this.tracks.clear(); },
+  update(dets){
+    const now = performance.now();
+    const used = new Set(); const results=[];
+    dets.forEach(d=>{
+      const cx=d.x+d.w/2, cy=d.y+d.h/2;
+      let bestId=null, bestDist=1e9;
+      for(const [id,tr] of this.tracks){
+        if(tr.cls!==d.cls) continue;
+        const tcx=tr.x+tr.w/2, tcy=tr.y+tr.h/2;
+        const dist=Math.hypot(cx-tcx, cy-tcy);
+        const thr=Math.min(60, Math.hypot(d.w,d.h)/6 + 10);
+        if(dist<thr && dist<bestDist && !used.has(id)){ bestDist=dist; bestId=id; }
+      }
+      if(bestId!=null){
+        const t=this.tracks.get(bestId);
+        t.x=d.x; t.y=d.y; t.w=d.w; t.h=d.h; t.cls=d.cls; t.last=now;
+        used.add(bestId); results.push({...d, id:bestId});
+      }else{
+        const id=this.nextId++; this.tracks.set(id,{x:d.x,y:d.y,w:d.w,h:d.h,cls:d.cls,last:now});
+        used.add(id); results.push({...d, id});
+      }
+    });
+    const maxMissMs=15*(1000/30);
+    for(const [id,tr] of Array.from(this.tracks)){ if(!used.has(id) && now-tr.last>maxMissMs) this.tracks.delete(id); }
+    return results;
+  }
+};
+
+/* ===== テンプレート追跡（NCC + カルマン + マルチスケール） ===== */
+class KalmanCV {
+  constructor() {
+    this.x = new Float64Array([0,0,0,0]); // [cx, cy, vx, vy]
+    this.P = matDiag(4, 1e2);
+    this.Qbase = 3.0;
+    this.Rbase = 6.0;
+    this.lastTs = null;
+  }
+  predict(dt){
+    if(!isFinite(dt) || dt<=0) dt = 1/30;
+    // 最新のスライダ値を反映
+    this.Qbase = +P.kQ || this.Qbase;
+
+    const F = [1,0,dt,0,
+               0,1,0,dt,
+               0,0,1,0,
+               0,0,0,1];
+
+    // P = F P F^T + Q
+    const q=this.Qbase, dt2=dt*dt, dt3=dt2*dt, dt4=dt2*dt2;
+    const Q = [q*dt4/4,0,         q*dt3/2,0,
+               0,        q*dt4/4, 0,        q*dt3/2,
+               q*dt3/2,  0,        q*dt2,   0,
+               0,        q*dt3/2,  0,        q*dt2];
+
+    // x = F x
+    this.x = mul(F, this.x, 4,4,1);
+
+    // P
+    const FP  = mul(F, this.P, 4,4,4);         // (4x4)
+    const FPt = mul(FP, transpose(F,4,4), 4,4,4); // (4x4)
+    this.P = add(FPt, Q);
+  }
+  update(zx, zy, Rscale=1){
+    // 最新のスライダ値を反映
+    this.Rbase = +P.kR || this.Rbase;
+
+    const H=[1,0,0,0,
+             0,1,0,0]; // (2x4)
+    const z=new Float64Array([zx,zy]);
+
+    // y = z - H x
+    const Hx = mul(H, this.x, 2,4,1);        // (2x1)
+    const y  = sub(z, Hx);                   // (2x1)
+
+    // S = H P H^T + R
+    const HP   = mul(H, this.P, 2,4,4);                      // (2x4)
+    const HPHt = mul(HP, transpose(H,2,4), 2,4,2);           // (2x2)
+    const Rm   = matDiag(2, this.Rbase * Rscale);            // (2x2)
+    const S    = add(HPHt, Rm);                              // (2x2)
+
+    // K = P H^T S^{-1}
+    const PHt  = mul(this.P, transpose(H,2,4), 4,4,2);       // (4x2)
+    const K    = mul(PHt, inv2(S), 4,2,2);                   // (4x2)
+
+    // x = x + K y
+    const Ky   = mul(K, y, 4,2,1);                           // (4x1)
+    this.x = add(this.x, Ky);
+
+    // P = (I - K H) P
+    const I = matDiag(4,1);
+    const KH = mul(K, H, 4,2,4);                              // (4x4)
+    const IKH= sub(I, KH);                                    // (4x4)
+    this.P = mul(IKH, this.P, 4,4,4);                         // (4x4)
+  }
+  get cx(){ return this.x[0]; }
+  get cy(){ return this.x[1]; }
+  set(x,y){ this.x[0]=x; this.x[1]=y; this.x[2]=0; this.x[3]=0; this.P = matDiag(4,50); }
+}
+
+function matDiag(n,v){ const m=new Float64Array(n*n); for(let i=0;i<n;i++) m[i*n+i]=v; return m; }
+function transpose(A,r,c){ const T=new Float64Array(r*c); for(let i=0;i<r;i++) for(let j=0;j<c;j++) T[j*r+i]=A[i*c+j]; return T; }
+function add(A,B){ const C=new Float64Array(A.length); for(let i=0;i<A.length;i++) C[i]=A[i]+B[i]; return C; }
+function sub(A,B){ const C=new Float64Array(A.length); for(let i=0;i<A.length;i++) C[i]=A[i]-B[i]; return C; }
+function mul(A,B, rA,cA,cB, leftT=false, rightT=false){
+  const _A = leftT ? transpose(A,cA,rA) : A;
+  const _B = rightT? transpose(B,cB,cA) : B;
+  const r = leftT? cA : rA, k = leftT? rA : cA, c = rightT? cA : cB;
+  const C = new Float64Array(r*c);
+  for(let i=0;i<r;i++){
+    for(let j=0;j<c;j++){
+      let s=0; for(let t=0;t<k;t++) s += _A[i*k+t]*_B[t*c+j];
+      C[i*c+j]=s;
+    }
+  }
+  return C;
+}
+function inv2(S){ const a=S[0], b=S[1], c=S[2], d=S[3]; const det = a*d - b*c || 1e-9; return new Float64Array([ d/det, -b/det, -c/det, a/det ]); }
+
+// グレースケール変換（平均0/分散1）
+function toGray(rgba, w, h){
+  const g = new Float32Array(w*h);
+  for(let i=0, j=0; i<rgba.length; i+=4, j++){
+    g[j] = (0.299*rgba[i] + 0.587*rgba[i+1] + 0.114*rgba[i+2]) / 255;
+  }
+  const n=g.length; let mean=0; for(let i=0;i<n;i++) mean += g[i]; mean/=n;
+  let varsum=0; for(let i=0;i<n;i++){ const d=g[i]-mean; g[i]=d; varsum+=d*d; }
+  const std = Math.sqrt(varsum) + 1e-6; for(let i=0;i<n;i++) g[i]/=std;
+  return g;
+}
+function ncc(frame, fw, fh, x, y, temp, tw, th){
+  let sum=0;
+  for(let j=0;j<th;j++){
+    let fi = (y+j)*fw + x;
+    let ti = j*tw;
+    for(let i=0;i<tw;i++){ sum += frame[fi++] * temp[ti++]; }
+  }
+  return sum / (tw*th);
+}
+function resampleGray(src, sw, sh, dw, dh){
+  const dst = new Float32Array(dw*dh);
+  for(let j=0;j<dh;j++){
+    const y = Math.min(sh-1, Math.max(0, Math.round(j*sh/dh)));
+    for(let i=0;i<dw;i++){
+      const x = Math.min(sw-1, Math.max(0, Math.round(i*sw/dw)));
+      dst[j*dw+i] = src[y*sw + x];
+    }
+  }
+  let m=0; for(let i=0;i<dst.length;i++) m+=dst[i]; m/=dst.length;
+  let v=0; for(let i=0;i<dst.length;i++){ const d=dst[i]-m; dst[i]=d; v+=d*d; }
+  const s=Math.sqrt(v)+1e-6; for(let i=0;i<dst.length;i++) dst[i]/=s;
+  return dst;
+}
+function cropGray(frameGray, fw, fh, x, y, w, h){
+  if(x<0||y<0||x+w>fw||y+h>fh) return null;
+  const g = new Float32Array(w*h);
+  for(let j=0;j<h;j++){
+    const srcRow = (y+j)*fw + x;
+    const dstRow = j*w;
+    for(let i=0;i<w;i++) g[dstRow+i] = frameGray[srcRow+i];
+  }
+  return g;
+}
+
+const tpl = {
+  gray: null, w:0, h:0,
+  x:0, y:0, cx:0, cy:0,
+  have:false,
+  kf: new KalmanCV(),
+  lastTs: null,
+
+  capture(x,y,w,h){
+    if(w<8 || h<8){ status.textContent='選択が小さすぎます（8px以上）'; return false; }
+    drawPreviewFromView(x,y,w,h);
+    const img = vctx.getImageData(Math.round(x),Math.round(y),Math.round(w),Math.round(h));
+    this.w = img.width; this.h = img.height; this.gray = toGray(img.data, this.w, this.h);
+    this.x = x; this.y = y; this.cx = x + this.w/2; this.cy = y + this.h/2;
+    this.kf = new KalmanCV(); this.kf.set(this.cx, this.cy); this.lastTs = performance.now()/1000;
+    this.have=true; tplSizeEl.textContent = `${this.w}×${this.h}px`; tplScoreEl.textContent = '—';
+    status.textContent=`テンプレート設定：${this.w}×${this.h}px`;
+    return true;
+  },
+
+  search(frameGray, fw, fh){
+    if(!this.have) return null;
+    const ts = performance.now()/1000;
+    const dt = (this.lastTs!=null)? Math.min(0.2, ts - this.lastTs) : 1/30;
+    this.lastTs = ts;
+
+    let bestScore=-2, bestX=this.x, bestY=this.y, bestScale=1.0;
+
+    // 検索中心・半径
+    let pcx = this.cx, pcy = this.cy, R = 80; // Kalman無効時
+    if (P.useKalman) {
+      this.kf.predict(dt);
+      pcx = this.kf.cx; pcy = this.kf.cy;
+      const sigma = Math.sqrt(this.kf.P[0] + this.kf.P[5]);
+      R = Math.max(32, Math.min(160, P.radiusMul * sigma));
+    }
+
+    // マルチスケール探索（UIの P.scales を使用）
+    const scales = Array.isArray(P.scales) && P.scales.length ? P.scales : [0.9,1.0,1.1];
+    for(const sc of scales){
+      const tw = Math.max(8, Math.round(this.w*sc));
+      const th = Math.max(8, Math.round(this.h*sc));
+      const X0 = Math.max(0, Math.round(pcx - tw/2 - R));
+      const Y0 = Math.max(0, Math.round(pcy - th/2 - R));
+      const X1 = Math.min(fw - tw, Math.round(pcx - tw/2 + R));
+      const Y1 = Math.min(fh - th, Math.round(pcy - th/2 + R));
+
+      let tgray = this.gray;
+      if(Math.abs(sc-1.0) > 1e-3){
+        tgray = resampleGray(this.gray, this.w, this.h, tw, th);
+      }
+
+      for(let yy=Y0; yy<=Y1; yy++){
+        for(let xx=X0; xx<=X1; xx++){
+          const s = ncc(frameGray, fw, fh, xx, yy, tgray, tw, th);
+          if(s > bestScore){ bestScore = s; bestX = xx; bestY = yy; bestScale = sc; }
+        }
+      }
+    }
+
+    // 位置更新
+    const mcx = bestX + (this.w*bestScale)/2;
+    const mcy = bestY + (this.h*bestScale)/2;
+
+    if (P.useKalman) {
+      const Rscale = (bestScore>0.90)? 0.5 : (bestScore>0.75)? 1.0 : (bestScore>0.55)? 3.0 : 8.0;
+      this.kf.update(mcx, mcy, Rscale);
+      this.cx = this.kf.cx; this.cy = this.kf.cy;
+    } else {
+      this.cx = mcx; this.cy = mcy;
+    }
+
+    this.x = this.cx - (this.w*bestScale)/2;
+    this.y = this.cy - (this.h*bestScale)/2;
+
+    // 良好時のみテンプレ微更新
+    const innovation = Math.hypot(pcx - mcx, pcy - mcy);
+    const pixGate = Math.max(2, Math.min(this.w, this.h) * 0.05); // テンプレの5%か2pxの大きい方
+    if(bestScore > 0.90 && bestScale > 0.98 && bestScale < 1.02 && innovation < pixGate){
+      const patch = cropGray(frameGray, fw, fh, Math.round(this.x), Math.round(this.y), this.w, this.h);
+      if(patch){
+        const alpha = 0.05;
+        for(let i=0;i<this.gray.length;i++) this.gray[i] = (1-alpha)*this.gray[i] + alpha*patch[i];
+        const g=this.gray; let mean=0; for(let i=0;i<g.length;i++) mean+=g[i]; mean/=g.length;
+        let varsum=0; for(let i=0;i<g.length;i++){ const d=g[i]-mean; g[i]=d; varsum+=d*d; }
+        const std=Math.sqrt(varsum)+1e-6; for(let i=0;i<g.length;i++) g[i]/=std;
+      }
+    }
+
+    tplScoreEl.textContent = bestScore.toFixed(2);
+    return { x:this.x, y:this.y, w:this.w*bestScale, h:this.h*bestScale, score:bestScore, cls:'template', id:1 };
+  },
+
+  clear(){
+    this.have=false;
+    this.gray=null;
+    this.kf=new KalmanCV();
+    tplCtx.clearRect(0,0,tplThumb.width,tplThumb.height);
+    tplSizeEl.textContent='–';
+    tplScoreEl.textContent='–';
+  }
+};
+
+
+function drawPreviewFromView(sx,sy,sw,sh){
+  const tW = tplThumb.width, tH = tplThumb.height;
+  tplCtx.clearRect(0,0,tW,tH);
+  const scale = Math.min(tW/sw, tH/sh);
+  const dw = Math.max(1, Math.floor(sw*scale)), dh = Math.max(1, Math.floor(sh*scale));
+  const dx = Math.floor((tW - dw)/2), dy = Math.floor((tH - dh)/2);
+  tplCtx.fillStyle='#f0f3ff'; tplCtx.fillRect(0,0,tW,tH);
+  tplCtx.imageSmoothingEnabled = false;
+  tplCtx.drawImage(view, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+/* ===== rAF描画 ===== */
+let drag = null;
+function drawLoop(){
+  if(!running) return;
+  vctx.drawImage(vid,0,0,view.width,view.height);
+
+  // ドラッグ中の選択枠
+  if(drag){
+    vctx.save();
+    vctx.strokeStyle='#ff2d55'; vctx.setLineDash([6,4]); vctx.lineWidth=2;
+    const x=Math.min(drag.x0,drag.x1), y=Math.min(drag.y0,drag.y1);
+    const w=Math.abs(drag.x1-drag.x0), h=Math.abs(drag.y1-drag.y0);
+    vctx.strokeRect(x+0.5,y+0.5,w,h);
+    vctx.restore();
+  }
+
+  vctx.save(); vctx.lineWidth=2; vctx.font='14px -apple-system,system-ui';
+  lastBoxes.forEach(b=>{
+    const isFace = (b.cls==='face-yolo' || b.cls==='face-device');
+    const isTpl  = (b.cls==='template');
+    vctx.strokeStyle = isTpl ? '#ff2d55' : (isFace ? (b.cls==='face-yolo' ? '#ff3b30' : '#ff7a00') : '#0f0');
+    vctx.strokeRect(b.x+0.5,b.y+0.5,b.w,b.h);
+    let name = isTpl ? 'template' : (isFace ? (b.cls==='face-yolo'?'face(YOLO)':'face(Device)') : (COCO80[b.cls]||('cls'+b.cls)));
+    const scoreTxt = (isTpl && typeof b.score==='number') ? ` ${b.score.toFixed(2)}` :
+                     (!isTpl && typeof b.score==='number' && !String(b.cls).startsWith('face-')) ? ` ${(b.score*100|0)}%` : '';
+    const label = `${name} #${b.id}${scoreTxt}`;
+    const tw=vctx.measureText(label).width+8, th=18;
+    vctx.fillStyle='rgba(0,0,0,.55)'; vctx.fillRect(b.x, b.y-th, tw, th);
+    vctx.fillStyle=vctx.strokeStyle; vctx.fillText(label, b.x+4, b.y-4);
+    const cx=b.x+b.w/2, cy=b.y+b.h/2;
+    vctx.beginPath(); vctx.arc(cx,cy,4,0,Math.PI*2); vctx.fill();
+  });
+  vctx.restore();
+
+  if(lastTgt){
+    boxInfo.textContent = `box: ${lastTgt.name} #${lastTgt.id} @(${lastTgt.x.toFixed(1)}, ${lastTgt.y.toFixed(1)})`;
+  }else{
+    boxInfo.textContent = (wantId!=='auto') ? `box: #${wantId}（不在）` : 'box: –';
+  }
+
+  requestAnimationFrame(drawLoop);
+}
+
+/* ===== 推論/追跡ループ ===== */
+let tplLost = 0;
+async function doInferenceOnce(){
+  if(!running || paused) return;
+
+  const mode = modeSel.value;
+
+  // --- テンプレート追跡 ---
+  if(mode === 'template'){
+    const frame = vctx.getImageData(0,0,view.width,view.height);
+    const frameGray = toGray(frame.data, view.width, view.height);
+
+    let boxes = [];
+    let b = null;
+
+    if(tpl.have){
+      b = tpl.search(frameGray, view.width, view.height);
+      if (b) boxes = [b];
+
+      if (b && b.score >= P.keep){
+        tplLost = 0;
+      } else if (++tplLost > P.lostFrames){
+        tplLost = 0;
+        // YOLOで再取得（近傍のみ採用）
+        if (!coco11Session) {
+          coco11Session = await ort.InferenceSession.create(COCO11_MODEL_PATH,
+            { executionProviders:['wasm'], graphOptimizationLevel:'all' });
+        }
+        const {tensor, meta} = preprocess(view, view.width, view.height, IN_SIZE);
+        const out = await coco11Session.run({ images: tensor });
+        const parsed = parseYolo(out);
+        const data = parsed.data, N = parsed.N, C = parsed.C;
+        const get = (i,k)=> data[k*N + i]; // CN前提（自作parseでCNにしている）
+
+        let best=null, bestDist=1e9;
+        for(let i=0;i<N;i++){
+          const cx=get(i,0), cy=get(i,1), w=get(i,2), h=get(i,3);
+          // ★ クラスロジット → 確率へ
+          let bests = 0;
+          for (let k=4; k<C; k++){
+            const p = sigmoid(get(i,k));
+            if (p > bests) bests = p;
+          }
+          if(bests<SCORE_TH) continue;
+          let x=(cx-w/2 - meta.dx)/meta.scale, y=(cy-h/2 - meta.dy)/meta.scale;
+          let ww=w/meta.scale, hh=h/meta.scale;
+          const cxx=x+ww/2, cyy=y+hh/2;
+          const dist=Math.hypot((tpl.kf.cx-cxx),(tpl.kf.cy-cyy));
+          if(dist<bestDist && dist<=P.reacquireDist){ bestDist=dist; best={x,y,ww,hh}; }
+        }
+        if(best){
+          // 既存テンプレはそのまま。Kalmanと中心だけ合わせ直す
+          const cx = best.x + best.ww/2;
+          const cy = best.y + best.hh/2;
+          tpl.kf.set(cx, cy);
+          tpl.cx = cx; tpl.cy = cy;
+          tpl.x  = cx - tpl.w/2;
+          tpl.y  = cy - tpl.h/2;
+          tpl.lastTs = performance.now()/1000;
+        }
+      }
+    }
+
+    // 記録・グラフ
+    if(recChk.checked && b){
+      const nowSec = performance.now()/1000;
+      records.push({ t: nowSec, id: 1, cls: 'template', x: b.x+b.w/2, y: b.y+b.h/2 });
+      if(records.length>5000) records.shift();
+      pushData(b.x+b.w/2, b.y+b.h/2);
+      lastTgt = { id:1, name:'template', x:b.x+b.w/2, y:b.y+b.h/2 };
+    } else {
+      lastTgt = null;
+    }
+
+    lastBoxes = boxes;
+    ifpsEl.textContent='—';
+    return; // ← ここで終了（以降のYOLO分岐に落ちない）
+  }
+
+  // --- YOLO 系（通常モード） ---
+  const yoloBoxes = await doYoloInference();
+  lastBoxes = yoloBoxes;
+}
+
+// --- YOLO 系 ---
+async function doYoloInference(){
+  const {tensor, meta} = preprocess(view, view.width, view.height, IN_SIZE);
+  let yoloBoxes=[];
+
+  // ✅ 未定義の mode を使わない
+  const modeCur = modeSel.value;
+
+  if (modeCur === 'coco11') {
+    // 念のためここでもセッションの初期化をフォールバック
+    if (!coco11Session) {
+      coco11Session = await ort.InferenceSession.create(
+        COCO11_MODEL_PATH,
+        { executionProviders:['wasm'], graphOptimizationLevel:'all' }
+      );
+    }
+    try{
+      const out = await coco11Session.run({ images: tensor });
+      const parsed = parseYolo(out);
+      const data = parsed.data, N = parsed.N, C = parsed.C, layout = parsed.layout || 'CN';
+      const dets = [];
+      const get = layout==='CN' ? ((i,k)=> data[k*N + i]) : ((i,k)=> data[i*C + k]);
+      for (let i=0;i<N;i++){
+        const cx=get(i,0), cy=get(i,1), w=get(i,2), h=get(i,3);
+        // ★ クラスロジット → 確率にして最大クラスを採用
+        let best = 0, cls = -1;
+        for (let k=4; k<C; k++){
+          const p = sigmoid(get(i,k));
+          if (p > best){ best = p; cls = k-4; }
+        }
+        if (best < SCORE_TH) continue;
+        let x=(cx-w/2 - meta.dx)/meta.scale, y=(cy-h/2 - meta.dy)/meta.scale;
+        let ww=w/meta.scale, hh=h/meta.scale;
+        x=Math.max(0,Math.min(view.width-1,x)); y=Math.max(0,Math.min(view.height-1,y));
+        if(x+ww>view.width) ww=view.width-x; if(y+hh>view.height) hh=view.height-y;
+        dets.push({x,y,w:ww,h:hh,score:best,cls});
+      }
+      yoloBoxes = nms(dets, NMS_IOU, MAX_DET);
+    }catch(e){
+      status.textContent = '推論エラー: '+(e.message||e);
+    }
+
+  } else if (modeCur === 'yolo-face') {
+    try{
+      if (!faceSession){
+        faceSession = await ort.InferenceSession.create(
+          FACE_MODEL_PATH,
+          { executionProviders:['wasm'], graphOptimizationLevel:'all' }
+        );
+      }
+      const out = await faceSession.run({ images: tensor });
+      const {data,N,C} = parseYolo(out);
+      const dets = [];
+      for(let i=0;i<N;i++){
+        const off=i*C; const cx=data[off+0], cy=data[off+1], w=data[off+2], h=data[off+3];
+        const faceScore = (C>4)? data[off+4] : 1.0;
+        if(faceScore < SCORE_TH) continue;
+        let x=(cx-w/2 - meta.dx)/meta.scale, y=(cy-h/2 - meta.dy)/meta.scale;
+        let ww=w/meta.scale, hh=h/meta.scale;
+        x=Math.max(0,Math.min(view.width-1,x)); y=Math.max(0,Math.min(view.height-1,y));
+        if(x+ww>view.width) ww=view.width-x; if(y+hh>view.height) hh=view.height-y;
+        dets.push({x,y,w:ww,h:hh,score:faceScore,cls:'face-yolo'});
+      }
+      yoloBoxes = nms(dets, NMS_IOU, MAX_DET);
+    }catch(e){
+      status.textContent='顔(YOLO)読み込み/推論に失敗：' + (e.message||e);
+    }
+
+  } else if (modeCur === 'device-face') {
+    if (faceDetector){
+      try{
+        const faces = await faceDetector.detect(view);
+        yoloBoxes = faces.map(f=>{
+          const b=f.boundingBox; return {x:b.x,y:b.y,w:b.width,h:b.height,score:0.99,cls:'face-device'};
+        });
+      }catch{}
+    } else {
+      status.textContent='この端末は FaceDetector に未対応です';
+    }
+  }
+
+  yoloBoxes = tracker.update(yoloBoxes);
+  lastBoxes = yoloBoxes;
+  updateIdSelector(yoloBoxes);
+
+  const names = Array.from(new Set(yoloBoxes.map(b=>{
+    if(b.cls==='face-yolo') return 'face(YOLO)';
+    if(b.cls==='face-device') return 'face(Device)';
+    return COCO80[b.cls]||('cls'+b.cls);
+  })));
+  detectedBar.innerHTML='';
+  names.slice(0,12).forEach(n=>{
+    const s=document.createElement('span'); s.className='chip'; s.textContent=n; detectedBar.appendChild(s);
+  });
+
+  const nowSec = performance.now()/1000;
+  let tgt=null;
+  if(wantId!=='auto'){ tgt = yoloBoxes.find(b=> b.id===Number(wantId)) || null; }
+  else if(yoloBoxes.length){
+    if(wantClass==='*'){ tgt=yoloBoxes[0]; }
+    else if(wantClass==='face-yolo'){ tgt=yoloBoxes.find(b=>b.cls==='face-yolo')||null; }
+    else if(wantClass==='face-device'){ tgt=yoloBoxes.find(b=>b.cls==='face-device')||null; }
+    else { const ci=Number(wantClass); tgt = yoloBoxes.filter(b=>b.cls===ci).sort((a,b)=> (b.score||0)-(a.score||0))[0]||null; }
+  }
+  // 記録処理も yoloBoxes 参照に統一
+  if(recChk.checked){
+    if(wantId!=='auto'){
+      const tb = yoloBoxes.find(b=> b.id===Number(wantId));
+      if(tb){
+        const name=(tb.cls==='face-yolo')?'face(YOLO)':(tb.cls==='face-device')?'face(Device)':(COCO80[tb.cls]||('cls'+tb.cls));
+        const cx=tb.x+tb.w/2, cy=tb.y+tb.h/2;
+        records.push({ t: nowSec, id: tb.id, cls: name, x: cx, y: cy });
+        if(records.length>5000) records.shift();
+      }
+    }else{
+      yoloBoxes.forEach(b=>{
+        let match=false, name='';
+        if(wantClass==='*'){ match=true; name=(b.cls==='face-yolo')?'face(YOLO)':(b.cls==='face-device')?'face(Device)':(COCO80[b.cls]||('cls'+b.cls)); }
+        else if(wantClass==='face-yolo'){ match=(b.cls==='face-yolo'); name='face(YOLO)'; }
+        else if(wantClass==='face-device'){ match=(b.cls==='face-device'); name='face(Device)'; }
+        else { match=(b.cls===Number(wantClass)); name=COCO80[b.cls]||('cls'+b.cls); }
+        if(match){
+          const cx=b.x+b.w/2, cy=b.y+b.h/2;
+          records.push({ t: nowSec, id: b.id, cls: name, x: cx, y: cy });
+          if(records.length>5000) records.shift();
+        }
+      });
+    }
+  }
+  if(tgt){
+    const cx=tgt.x+tgt.w/2, cy=tgt.y+tgt.h/2;
+    const name=(tgt.cls==='face-yolo')?'face(YOLO)':(tgt.cls==='face-device')?'face(Device)':(COCO80[tgt.cls]||('cls'+tgt.cls));
+    lastTgt = { id: tgt.id, name, x: cx, y: cy };
+    pushData(cx,cy);
+  } else {
+    lastTgt = null;
+  }
+
+  iCount++; const now=performance.now(); if(now-lastI>1000){ ifpsEl.textContent=(iCount*1000/(now-lastI)).toFixed(0); iCount=0; lastI=now; }
+  return yoloBoxes;
+}
+
+/* ===== 起動/操作 ===== */
+startBtn.onclick = async ()=>{
+  try{
+    await openCamera();
+    running=true; paused=false;
+    startBtn.disabled=true; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
+    modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false;
+
+    buildClassSelectFor(modeSel.value);
+    meterVideo();
+
+    await ort.env.ready;
+    if(!coco11Session){
+      coco11Session = await ort.InferenceSession.create(COCO11_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
+    }
+    status.textContent='';
+
+    requestAnimationFrame(drawLoop);
+    if(inferTimer) clearInterval(inferTimer);
+    inferTimer = setInterval(()=>{ if(!paused) doInferenceOnce(); }, 80);
+    setInterval(()=>{ if(!paused) drawNiceChart(); }, 100);
+  }catch(e){
+    console.error(e);
+    status.textContent = '初期化エラー: ' + (e.message || e.toString());
+  }
+};
+pauseBtn.onclick = ()=>{ if(!running) return; paused=!paused; pauseBtn.textContent = paused ? '▶ 再開' : '⏸ 一時停止'; if(!paused){ doInferenceOnce(); drawNiceChart(); } };
+resetBtn.onclick = ()=> resetData();
+dlBtn.onclick = ()=>{
+  if(!records.length){ alert('記録がありません'); return; }
+  let csv='time,id,class,x,y\n';
+  records.forEach(r=> csv+=`${r.t.toFixed(2)},${r.id},${r.cls},${r.x.toFixed(1)},${r.y.toFixed(1)}\n`);
+  const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='record.csv'; a.click(); URL.revokeObjectURL(url);
+};
+
+/* ===== ドラッグでテンプレ選択 ===== */
+function getXY(evt){
+  const rect = view.getBoundingClientRect();
+  const px = (evt.touches? evt.touches[0].clientX : evt.clientX) - rect.left;
+  const py = (evt.touches? evt.touches[0].clientY : evt.clientY) - rect.top;
+  const sx = view.width  / rect.width;
+  const sy = view.height / rect.height;
+  return { x: px*sx, y: py*sy };
+}
+view.addEventListener('pointerdown', e=>{
+  if(modeSel.value!=='template') return;
+  const p=getXY(e); drag={x0:p.x,y0:p.y,x1:p.x,y1:p.y}; tpl.clear();
+});
+view.addEventListener('pointermove', e=>{
+  if(modeSel.value!=='template' || !drag) return;
+  const p=getXY(e); drag.x1=p.x; drag.y1=p.y;
+  const x=Math.max(0, Math.min(drag.x0, drag.x1));
+  const y=Math.max(0, Math.min(drag.y0, drag.y1));
+  const w=Math.min(view.width - x,  Math.abs(drag.x1 - drag.x0));
+  const h=Math.min(view.height - y, Math.abs(drag.y1 - drag.y0));
+  if(w>=8 && h>=8) drawPreviewFromView(x,y,w,h);
+});
+view.addEventListener('pointerup', e=>{
+  if(modeSel.value!=='template' || !drag) return;
+  const x=Math.max(0, Math.min(drag.x0, drag.x1));
+  const y=Math.max(0, Math.min(drag.y0, drag.y1));
+  const w=Math.min(view.width - x,  Math.abs(drag.x1 - drag.x0));
+  const h=Math.min(view.height - y, Math.abs(drag.y1 - drag.y0));
+  drag=null;
+  if(w>=8 && h>=8){ tpl.capture(x,y,w,h); recChk.checked=true; } else { status.textContent='8px以上で選んでください'; tpl.clear(); }
+});
+
+/* ===== クリックで「検出ボックス → テンプレ化」 ===== */
+view.addEventListener('click', (e)=>{
+  if(drag) return;
+  if(modeSel.value === 'template') return;
+  const rect = view.getBoundingClientRect();
+  const sx = view.width  / rect.width;
+  const sy = view.height / rect.height;
+  const x = (e.clientX - rect.left) * sx;
+  const y = (e.clientY - rect.top)  * sy;
+
+  const hit = [...lastBoxes]
+    .filter(b => x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h)
+    .sort((a,b)=> (b.score||0) - (a.score||0))[0];
+
+  if(hit){
+    tpl.capture(hit.x, hit.y, hit.w, hit.h);
+    recChk.checked = true;
+    modeSel.value = 'template';
+    buildClassSelectFor('template');
+    wantId='auto'; idSel.innerHTML='<option value="auto">auto（#1固定）</option>';
+    status.textContent = '検出ボックスをテンプレート化しました（テンプレートモードに切替）';
+  }
+});
+</script>

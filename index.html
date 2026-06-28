@@ -243,15 +243,49 @@ let lastTgt   = null;
 let inferTimer = null;
 
 /* ===== カメラ：開始/停止/再起動 + ウォッチドッグ ===== */
+function cameraErrorMessage(e){
+  if(!window.isSecureContext){
+    return 'カメラはHTTPS（またはlocalhost）でのみ利用できます。GitHub Pagesの https:// URLを開いてください。';
+  }
+  if(e && (e.name==='NotAllowedError' || e.name==='SecurityError')){
+    return 'カメラの使用が拒否されています。アドレスバー左のサイト設定 → カメラ →「許可」に変更し、ページを再読み込みしてください。Macでは「システム設定 → プライバシーとセキュリティ → カメラ」でブラウザも許可してください。';
+  }
+  if(e && e.name==='NotFoundError') return '利用できるカメラが見つかりません。カメラの接続とOSの設定を確認してください。';
+  if(e && (e.name==='NotReadableError' || e.name==='AbortError')) return 'カメラを開始できません。他のアプリやタブがカメラを使用していないか確認してください。';
+  if(e && e.name==='OverconstrainedError') return '指定条件に合うカメラがありません。別のカメラ設定で再試行します。';
+  return 'カメラを開始できません: ' + ((e && e.message) || e || '不明なエラー');
+}
+
 async function openCamera(){
   view.width=W; view.height=H;
-  camStream = await navigator.mediaDevices.getUserMedia({
-    video:{width:{ideal:W},height:{ideal:H},frameRate:{ideal:30,max:30},facingMode:'environment'},
-    audio:false
-  });
+  if(!window.isSecureContext) throw new DOMException('HTTPS is required', 'SecurityError');
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    throw new DOMException('getUserMedia is unavailable', 'NotSupportedError');
+  }
+
+  // 背面カメラを優先するが、PCや非対応端末では任意のカメラへフォールバックする。
+  const candidates = [
+    {video:{width:{ideal:W},height:{ideal:H},frameRate:{ideal:30,max:30},facingMode:{ideal:'environment'}},audio:false},
+    {video:{width:{ideal:W},height:{ideal:H},frameRate:{ideal:30,max:30}},audio:false},
+    {video:true,audio:false}
+  ];
+  let lastError=null;
+  for(const constraints of candidates){
+    try{
+      camStream = await navigator.mediaDevices.getUserMedia(constraints);
+      break;
+    }catch(e){
+      lastError=e;
+      // 権限拒否は条件を変えても直らず、複数回プロンプトを出すべきではない。
+      if(e.name==='NotAllowedError' || e.name==='SecurityError') throw e;
+    }
+  }
+  if(!camStream) throw lastError || new Error('No camera stream');
+
   const track = camStream.getVideoTracks()[0];
   track.onended = ()=>{ console.warn('camera track ended → restart'); restartCamera(); };
-  track.onmute  = ()=>{ console.warn('camera muted → restart'); restartCamera(); };
+  // 一時的なmuteで再許可要求を繰り返さない。
+  track.onmute  = ()=>{ console.warn('camera muted'); };
   track.onunmute= ()=>{ console.log('camera unmuted'); };
 
   vid.srcObject = camStream;
@@ -281,7 +315,7 @@ function stopCamera(){
 async function restartCamera(){
   stopCamera();
   try{ await openCamera(); }
-  catch(e){ console.error('restartCamera failed:', e); status.textContent = 'カメラ再起動に失敗: ' + (e.message||e); }
+  catch(e){ console.error('restartCamera failed:', e); status.textContent = cameraErrorMessage(e); }
 }
 /* タブ切替での安全化 */
 document.addEventListener('visibilitychange', async ()=>{
@@ -983,6 +1017,8 @@ async function doYoloInference(){
 /* ===== 起動/操作 ===== */
 startBtn.onclick = async ()=>{
   try{
+    startBtn.disabled=true;
+    status.textContent='カメラの許可を確認しています…';
     await openCamera();
     running=true; paused=false;
     startBtn.disabled=true; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
@@ -1003,7 +1039,12 @@ startBtn.onclick = async ()=>{
     setInterval(()=>{ if(!paused) drawNiceChart(); }, 100);
   }catch(e){
     console.error(e);
-    status.textContent = '初期化エラー: ' + (e.message || e.toString());
+    stopCamera();
+    running=false;
+    startBtn.disabled=false;
+    const message=cameraErrorMessage(e);
+    status.textContent=message;
+    if(e && (e.name==='NotAllowedError' || e.name==='SecurityError')) alert(message);
   }
 };
 pauseBtn.onclick = ()=>{ if(!running) return; paused=!paused; pauseBtn.textContent = paused ? '▶ 再開' : '⏸ 一時停止'; if(!paused){ doInferenceOnce(); drawNiceChart(); } };

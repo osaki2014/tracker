@@ -28,17 +28,14 @@
   #status{max-width:1200px;margin:0 auto 12px;color:#444;font-size:14px;padding:0 10px}
 </style>
 
-<!-- onnxruntime-web：Safari 安定化（単一スレッドWASM） -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<!-- ライブラリ読込後、セッション作成前に設定する -->
 <script>
-  window.ort = window.ort || {};
-  ort.env = ort.env || {};
-  ort.env.wasm = ort.env.wasm || {};
-  ort.env.wasm.numThreads = 1;   // iPad/Safariでの安定運用
+  ort.env.wasm.numThreads = 1;
   ort.env.wasm.proxy = false;
   ort.env.wasm.simd = true;
-  ort.env.logLevel = 'warning';
+  ort.env.logLevel = 'error';
 </script>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
 
 <header>
   <button id="start">▶ カメラ開始</button>
@@ -48,8 +45,8 @@
 
   <label>モード:
     <select id="mode" disabled>
-      <option value="coco11">物体（YOLOv11, COCO80）</option>
-      <option value="yolo-face">顔（YOLOv8-face）</option>
+      <option value="coco11">物体・人物全体（YOLO11, COCO80）</option>
+      <option value="yolo-face" selected>顔だけ（YOLOv8-face）</option>
       <option value="device-face">顔（Device）</option>
       <option value="template">手動トラッカ（テンプレート）</option>
       </select>
@@ -241,6 +238,8 @@ let camStream = null;
 let lastBoxes = [];
 let lastTgt   = null;
 let inferTimer = null;
+let inferBusy = false;
+let chartTimer = null;
 
 /* ===== カメラ：開始/停止/再起動 + ウォッチドッグ ===== */
 function cameraErrorMessage(e){
@@ -431,7 +430,7 @@ function drawNiceChart(){
 
 /* ===== 前処理/YOLO/NMS ===== */
 const prepCanvas=document.createElement('canvas');
-const prepCtx    =prepCanvas.getContext('2d');
+const prepCtx    =prepCanvas.getContext('2d', { willReadFrequently:true });
 function preprocess(canvas,W,H,s=IN_SIZE){
   prepCanvas.width=s; prepCanvas.height=s;
   const scale=Math.min(s/W,s/H);
@@ -1028,15 +1027,22 @@ startBtn.onclick = async ()=>{
     meterVideo();
 
     await ort.env.ready;
-    if(!coco11Session){
+    if(modeSel.value==='coco11' && !coco11Session){
       coco11Session = await ort.InferenceSession.create(COCO11_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
     }
     status.textContent='';
 
     requestAnimationFrame(drawLoop);
     if(inferTimer) clearInterval(inferTimer);
-    inferTimer = setInterval(()=>{ if(!paused) doInferenceOnce(); }, 80);
-    setInterval(()=>{ if(!paused) drawNiceChart(); }, 100);
+    inferTimer = setInterval(async ()=>{
+      if(paused || inferBusy) return;
+      inferBusy=true;
+      try { await doInferenceOnce(); }
+      catch(e){ console.error(e); status.textContent='推論エラー: '+(e.message||e); }
+      finally { inferBusy=false; }
+    }, 80);
+    if(chartTimer) clearInterval(chartTimer);
+    chartTimer = setInterval(()=>{ if(!paused) drawNiceChart(); }, 100);
   }catch(e){
     console.error(e);
     stopCamera();

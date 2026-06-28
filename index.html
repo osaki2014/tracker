@@ -46,6 +46,7 @@
   <label>モード:
     <select id="mode" disabled>
       <option value="coco11">物体・人物全体（YOLO11, COCO80）</option>
+      <option value="coco26">物体・人物全体（YOLO26n, COCO80）</option>
       <option value="yolo-face" selected>顔だけ（YOLOv8-face）</option>
       <option value="device-face">顔（Device）</option>
       <option value="template">手動トラッカ（テンプレート）</option>
@@ -140,6 +141,7 @@
 <script>
 /* ===== モデル/閾値 ===== */
 const COCO11_MODEL_PATH = './yolo11n.onnx';       // Ultralytics YOLOv11n ONNX (float32)
+const COCO26_MODEL_PATH = './yolo26n.onnx';       // Ultralytics YOLO26n ONNX End-to-End
 const FACE_MODEL_PATH   = './yolov8n-face.onnx';  // 使う場合のみ同フォルダに置く
 const IN_SIZE  = 256;
 const SCORE_TH = 0.50, NMS_IOU = 0.45, MAX_DET = 20;
@@ -222,7 +224,7 @@ const tplScoreEl=document.getElementById('tplScore');
 /* ===== 状態 ===== */
 let W=640, H=360;
 let running=false, paused=false;
-let coco11Session=null, faceSession=null;
+let coco11Session=null, coco26Session=null, faceSession=null;
 let wantClass='*', wantId='auto';
 let series=[], records=[];
 let vCount=0,lastV=performance.now(), iCount=0,lastI=performance.now();
@@ -327,7 +329,7 @@ document.addEventListener('visibilitychange', async ()=>{
 function buildClassSelectFor(mode){
   clsSel.innerHTML='';
   const any=document.createElement('option'); any.value='*'; any.textContent='Any（全部）'; clsSel.appendChild(any);
-  if(mode==='coco11'){
+  if(mode==='coco11' || mode==='coco26'){
     COCO80.forEach((n,i)=>{const o=document.createElement('option'); o.value=String(i); o.textContent=`${i}: ${n}`; clsSel.appendChild(o);});
   }else if(mode==='yolo-face'){
     const o=document.createElement('option'); o.value='face-yolo'; o.textContent='face（YOLO）'; clsSel.appendChild(o);
@@ -336,7 +338,7 @@ function buildClassSelectFor(mode){
   }else if(mode==='template'){
     const o=document.createElement('option'); o.value='template'; o.textContent='template（手動）'; clsSel.appendChild(o);
   }
-  clsSel.value = (mode==='coco11') ? '*' : (mode==='yolo-face' ? 'face-yolo' : (mode==='device-face' ? 'face-device' : 'template'));
+  clsSel.value = (mode==='coco11' || mode==='coco26') ? '*' : (mode==='yolo-face' ? 'face-yolo' : (mode==='device-face' ? 'face-device' : 'template'));
   wantClass = clsSel.value;
 }
 function updateIdSelector(currentBoxes){
@@ -940,6 +942,46 @@ async function doYoloInference(){
       status.textContent = '推論エラー: '+(e.message||e);
     }
 
+  } else if (modeCur === 'coco26') {
+    try{
+      if(!coco26Session){
+        coco26Session = await ort.InferenceSession.create(
+          COCO26_MODEL_PATH,
+          { executionProviders:['wasm'], graphOptimizationLevel:'all' }
+        );
+      }
+      const out = await coco26Session.run({images:tensor});
+      const result = out.output0 || out[Object.keys(out)[0]];
+      const data=result.data, dims=result.dims;
+      if(dims.length!==3 || dims[2]!==6){
+        throw new Error('想定外のYOLO26出力形状: '+dims.join('×'));
+      }
+      const dets=[];
+      for(let i=0;i<dims[1];i++){
+        const off=i*6;
+        const score=data[off+4], cls=Math.round(data[off+5]);
+        if(score<SCORE_TH || cls<0 || cls>=COCO80.length) continue;
+
+        // End-to-End出力: [x1,y1,x2,y2,confidence,class_id]
+        let x=(data[off+0]-meta.dx)/meta.scale;
+        let y=(data[off+1]-meta.dy)/meta.scale;
+        let x2=(data[off+2]-meta.dx)/meta.scale;
+        let y2=(data[off+3]-meta.dy)/meta.scale;
+        x=Math.max(0,Math.min(view.width,x));
+        y=Math.max(0,Math.min(view.height,y));
+        x2=Math.max(0,Math.min(view.width,x2));
+        y2=Math.max(0,Math.min(view.height,y2));
+        const w=x2-x, h=y2-y;
+        if(w<2 || h<2) continue;
+        dets.push({x,y,w,h,score,cls});
+        if(dets.length>=MAX_DET) break; // 出力は信頼度順で、NMS済み
+      }
+      yoloBoxes=dets;
+    }catch(e){
+      console.error(e);
+      status.textContent='YOLO26読み込み/推論に失敗：'+(e.message||e);
+    }
+
   } else if (modeCur === 'yolo-face') {
     try{
       if (!faceSession){
@@ -1056,6 +1098,9 @@ startBtn.onclick = async ()=>{
     await ort.env.ready;
     if(modeSel.value==='coco11' && !coco11Session){
       coco11Session = await ort.InferenceSession.create(COCO11_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
+    }
+    if(modeSel.value==='coco26' && !coco26Session){
+      coco26Session = await ort.InferenceSession.create(COCO26_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
     }
     status.textContent='';
 

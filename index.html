@@ -585,25 +585,37 @@ function mul(A,B, rA,cA,cB, leftT=false, rightT=false){
 }
 function inv2(S){ const a=S[0], b=S[1], c=S[2], d=S[3]; const det = a*d - b*c || 1e-9; return new Float64Array([ d/det, -b/det, -c/det, a/det ]); }
 
-// グレースケール変換（平均0/分散1）
+// フレームは0..1の生輝度で保持し、候補領域ごとにNCC正規化する。
 function toGray(rgba, w, h){
   const g = new Float32Array(w*h);
   for(let i=0, j=0; i<rgba.length; i+=4, j++){
     g[j] = (0.299*rgba[i] + 0.587*rgba[i+1] + 0.114*rgba[i+2]) / 255;
   }
-  const n=g.length; let mean=0; for(let i=0;i<n;i++) mean += g[i]; mean/=n;
-  let varsum=0; for(let i=0;i<n;i++){ const d=g[i]-mean; g[i]=d; varsum+=d*d; }
-  const std = Math.sqrt(varsum) + 1e-6; for(let i=0;i<n;i++) g[i]/=std;
+  return g;
+}
+function normalizeTemplate(g){
+  const n=g.length;
+  let mean=0; for(let i=0;i<n;i++) mean+=g[i]; mean/=n;
+  let energy=0;
+  for(let i=0;i<n;i++){ g[i]-=mean; energy+=g[i]*g[i]; }
+  const norm=Math.sqrt(energy)+1e-9;
+  for(let i=0;i<n;i++) g[i]/=norm;
   return g;
 }
 function ncc(frame, fw, fh, x, y, temp, tw, th){
-  let sum=0;
+  const n=tw*th;
+  let sumF=0, sumF2=0, cross=0;
   for(let j=0;j<th;j++){
     let fi = (y+j)*fw + x;
     let ti = j*tw;
-    for(let i=0;i<tw;i++){ sum += frame[fi++] * temp[ti++]; }
+    for(let i=0;i<tw;i++){
+      const f=frame[fi++], t=temp[ti++];
+      sumF+=f; sumF2+=f*f; cross+=f*t;
+    }
   }
-  return sum / (tw*th);
+  // tempは平均0・L2ノルム1なので、局所ZNCCはこの形で求まる。
+  const frameEnergy=sumF2-(sumF*sumF/n);
+  return frameEnergy>1e-9 ? cross/Math.sqrt(frameEnergy) : -1;
 }
 function resampleGray(src, sw, sh, dw, dh){
   const dst = new Float32Array(dw*dh);
@@ -614,10 +626,7 @@ function resampleGray(src, sw, sh, dw, dh){
       dst[j*dw+i] = src[y*sw + x];
     }
   }
-  let m=0; for(let i=0;i<dst.length;i++) m+=dst[i]; m/=dst.length;
-  let v=0; for(let i=0;i<dst.length;i++){ const d=dst[i]-m; dst[i]=d; v+=d*d; }
-  const s=Math.sqrt(v)+1e-6; for(let i=0;i<dst.length;i++) dst[i]/=s;
-  return dst;
+  return normalizeTemplate(dst);
 }
 function cropGray(frameGray, fw, fh, x, y, w, h){
   if(x<0||y<0||x+w>fw||y+h>fh) return null;
@@ -641,7 +650,8 @@ const tpl = {
     if(w<8 || h<8){ status.textContent='選択が小さすぎます（8px以上）'; return false; }
     drawPreviewFromView(x,y,w,h);
     const img = vctx.getImageData(Math.round(x),Math.round(y),Math.round(w),Math.round(h));
-    this.w = img.width; this.h = img.height; this.gray = toGray(img.data, this.w, this.h);
+    this.w = img.width; this.h = img.height;
+    this.gray = normalizeTemplate(toGray(img.data, this.w, this.h));
     this.x = x; this.y = y; this.cx = x + this.w/2; this.cy = y + this.h/2;
     this.kf = new KalmanCV(); this.kf.set(this.cx, this.cy); this.lastTs = performance.now()/1000;
     this.have=true; tplSizeEl.textContent = `${this.w}×${this.h}px`; tplScoreEl.textContent = '—';
@@ -663,7 +673,8 @@ const tpl = {
       this.kf.predict(dt);
       pcx = this.kf.cx; pcy = this.kf.cy;
       const sigma = Math.sqrt(this.kf.P[0] + this.kf.P[5]);
-      R = Math.max(32, Math.min(160, P.radiusMul * sigma));
+      const sizeBase = Math.max(48, Math.min(this.w,this.h)*0.65);
+      R = Math.max(sizeBase, Math.min(220, sizeBase*P.radiusMul + sigma));
     }
 
     // マルチスケール探索（UIの P.scales を使用）
@@ -681,45 +692,61 @@ const tpl = {
         tgray = resampleGray(this.gray, this.w, this.h, tw, th);
       }
 
-      for(let yy=Y0; yy<=Y1; yy++){
-        for(let xx=X0; xx<=X1; xx++){
+      // 大きいテンプレートは2～3px刻みで粗探索し、最良点の周囲だけ1px刻みで詰める。
+      const step = tw*th>18000 ? 3 : (tw*th>5000 ? 2 : 1);
+      let scaleBest=-2, scaleX=X0, scaleY=Y0;
+      for(let yy=Y0; yy<=Y1; yy+=step){
+        for(let xx=X0; xx<=X1; xx+=step){
           const s = ncc(frameGray, fw, fh, xx, yy, tgray, tw, th);
-          if(s > bestScore){ bestScore = s; bestX = xx; bestY = yy; bestScale = sc; }
+          if(s>scaleBest){ scaleBest=s; scaleX=xx; scaleY=yy; }
         }
       }
+      if(step>1){
+        const rx0=Math.max(X0,scaleX-step), rx1=Math.min(X1,scaleX+step);
+        const ry0=Math.max(Y0,scaleY-step), ry1=Math.min(Y1,scaleY+step);
+        for(let yy=ry0;yy<=ry1;yy++) for(let xx=rx0;xx<=rx1;xx++){
+          const s=ncc(frameGray,fw,fh,xx,yy,tgray,tw,th);
+          if(s>scaleBest){ scaleBest=s; scaleX=xx; scaleY=yy; }
+        }
+      }
+      if(scaleBest>bestScore){ bestScore=scaleBest; bestX=scaleX; bestY=scaleY; bestScale=sc; }
     }
 
     // 位置更新
     const mcx = bestX + (this.w*bestScale)/2;
     const mcy = bestY + (this.h*bestScale)/2;
 
-    if (P.useKalman) {
+    const accepted = bestScore >= P.keep;
+    if (P.useKalman && accepted) {
       const Rscale = (bestScore>0.90)? 0.5 : (bestScore>0.75)? 1.0 : (bestScore>0.55)? 3.0 : 8.0;
       this.kf.update(mcx, mcy, Rscale);
       this.cx = this.kf.cx; this.cy = this.kf.cy;
-    } else {
+    } else if(!P.useKalman && accepted) {
       this.cx = mcx; this.cy = mcy;
+    } else if(P.useKalman) {
+      // 信頼できない候補へ飛ばず、短時間は運動予測位置を維持する。
+      this.cx = this.kf.cx; this.cy = this.kf.cy;
     }
 
-    this.x = this.cx - (this.w*bestScale)/2;
-    this.y = this.cy - (this.h*bestScale)/2;
+    const outputScale=accepted ? bestScale : 1.0;
+    this.x = Math.max(0,Math.min(fw-this.w*outputScale,this.cx-(this.w*outputScale)/2));
+    this.y = Math.max(0,Math.min(fh-this.h*outputScale,this.cy-(this.h*outputScale)/2));
 
     // 良好時のみテンプレ微更新
     const innovation = Math.hypot(pcx - mcx, pcy - mcy);
     const pixGate = Math.max(2, Math.min(this.w, this.h) * 0.05); // テンプレの5%か2pxの大きい方
-    if(bestScore > 0.90 && bestScale > 0.98 && bestScale < 1.02 && innovation < pixGate){
+    if(bestScore >= Math.max(P.update,0.82) && bestScale > 0.98 && bestScale < 1.02 && innovation < pixGate){
       const patch = cropGray(frameGray, fw, fh, Math.round(this.x), Math.round(this.y), this.w, this.h);
       if(patch){
-        const alpha = 0.05;
+        normalizeTemplate(patch);
+        const alpha = 0.025;
         for(let i=0;i<this.gray.length;i++) this.gray[i] = (1-alpha)*this.gray[i] + alpha*patch[i];
-        const g=this.gray; let mean=0; for(let i=0;i<g.length;i++) mean+=g[i]; mean/=g.length;
-        let varsum=0; for(let i=0;i<g.length;i++){ const d=g[i]-mean; g[i]=d; varsum+=d*d; }
-        const std=Math.sqrt(varsum)+1e-6; for(let i=0;i<g.length;i++) g[i]/=std;
+        normalizeTemplate(this.gray);
       }
     }
 
     tplScoreEl.textContent = bestScore.toFixed(2);
-    return { x:this.x, y:this.y, w:this.w*bestScale, h:this.h*bestScale, score:bestScore, cls:'template', id:1 };
+    return { x:this.x, y:this.y, w:this.w*outputScale, h:this.h*outputScale, score:bestScore, cls:'template', id:1 };
   },
 
   clear(){

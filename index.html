@@ -225,6 +225,7 @@ const tplScoreEl=document.getElementById('tplScore');
 let W=640, H=360;
 let running=false, paused=false;
 let coco11Session=null, coco26Session=null, faceSession=null;
+let coco26LoadPromise=null, coco26LoadError=null;
 let wantClass='*', wantId='auto';
 let series=[], records=[];
 let vCount=0,lastV=performance.now(), iCount=0,lastI=performance.now();
@@ -363,6 +364,8 @@ function updateIdSelector(currentBoxes){
   wantId = idSel.value;
 }
 modeSel.addEventListener('change', ()=>{
+  // モードを選び直したときだけ、モデル読込を1回再試行できるようにする。
+  if(modeSel.value==='coco26') coco26LoadError=null;
   buildClassSelectFor(modeSel.value);
   tracker.reset(); tpl.clear();
   idSel.innerHTML = '<option value="auto">auto（#1固定）</option>';
@@ -463,6 +466,34 @@ function nms(d,th=0.45,max=MAX_DET){d.sort((a,b)=>b.score-a.score);const p=[];wh
 const sigmoid = x => 1 / (1 + Math.exp(-x));
 // YOLO11の出力は通常すでに確率。logit形式のモデルだけsigmoidを通す。
 const asProbability = x => (x>=0 && x<=1) ? x : sigmoid(x);
+
+async function ensureCoco26Session(){
+  if(coco26Session) return coco26Session;
+  if(coco26LoadError) return null;
+  if(coco26LoadPromise) return coco26LoadPromise;
+
+  coco26LoadPromise=(async()=>{
+    try{
+      // 先に存在確認し、404時にONNX Runtimeの長いスタックトレースを連発させない。
+      const response=await fetch(COCO26_MODEL_PATH,{method:'HEAD',cache:'no-store'});
+      if(!response.ok){
+        throw new Error(`モデルが見つかりません（HTTP ${response.status}）: ${new URL(COCO26_MODEL_PATH,location.href).href}`);
+      }
+      coco26Session=await ort.InferenceSession.create(
+        COCO26_MODEL_PATH,
+        {executionProviders:['wasm'],graphOptimizationLevel:'all'}
+      );
+      return coco26Session;
+    }catch(e){
+      coco26LoadError=e;
+      console.error('YOLO26モデルを読み込めません。GitHub Pagesへyolo26n.onnxをアップロードしてください。',e);
+      return null;
+    }finally{
+      coco26LoadPromise=null;
+    }
+  })();
+  return coco26LoadPromise;
+}
 
 
 /* ===== 簡易トラッカ（ID付与） ===== */
@@ -943,14 +974,17 @@ async function doYoloInference(){
     }
 
   } else if (modeCur === 'coco26') {
+    if(coco26LoadError){
+      status.textContent='YOLO26モデルが公開先にありません。GitHubへ yolo26n.onnx をアップロードしてから再読み込みしてください。';
+      return [];
+    }
     try{
-      if(!coco26Session){
-        coco26Session = await ort.InferenceSession.create(
-          COCO26_MODEL_PATH,
-          { executionProviders:['wasm'], graphOptimizationLevel:'all' }
-        );
+      const session=await ensureCoco26Session();
+      if(!session){
+        status.textContent='YOLO26モデルが公開先にありません。GitHubへ yolo26n.onnx をアップロードしてから再読み込みしてください。';
+        return [];
       }
-      const out = await coco26Session.run({images:tensor});
+      const out = await session.run({images:tensor});
       const result = out.output0 || out[Object.keys(out)[0]];
       const data=result.data, dims=result.dims;
       if(dims.length!==3 || dims[2]!==6){
@@ -978,7 +1012,9 @@ async function doYoloInference(){
       }
       yoloBoxes=dets;
     }catch(e){
-      console.error(e);
+      // 推論エラーも同一フレームごとに再試行しない。
+      coco26LoadError=e;
+      console.error('YOLO26推論を停止しました。',e);
       status.textContent='YOLO26読み込み/推論に失敗：'+(e.message||e);
     }
 
@@ -1099,9 +1135,7 @@ startBtn.onclick = async ()=>{
     if(modeSel.value==='coco11' && !coco11Session){
       coco11Session = await ort.InferenceSession.create(COCO11_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
     }
-    if(modeSel.value==='coco26' && !coco26Session){
-      coco26Session = await ort.InferenceSession.create(COCO26_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
-    }
+    // YOLO26は選択後の最初の推論時に1回だけ遅延読込する。
     status.textContent='';
 
     requestAnimationFrame(drawLoop);

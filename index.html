@@ -3,29 +3,75 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>物体/顔検出 + 手動トラッカ（YOLOv11 / ONNX / iPad）</title>
 <style>
-  :root{--card:#fff;--ink:#222;--pill:#edf2ff;--pill-b:#cdd8ff}
-  body{margin:0;background:#eef5ff;color:var(--ink);font:16px/1.6 "M PLUS Rounded 1c",-apple-system,system-ui}
-  header{position:sticky;top:0;z-index:10;background:var(--card);padding:10px 12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;box-shadow:0 2px 4px rgba(0,0,0,.08)}
-  button,select,label{font-size:16px}
-  button{background:#4da6ff;color:#fff;border:none;border-radius:10px;padding:8px 12px;cursor:pointer}
-  button:hover{background:#3385ff} button:disabled{opacity:.6;cursor:not-allowed}
-  .pill{padding:2px 8px;border-radius:999px;background:var(--pill);border:1px solid var(--pill-b)}
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;600;700&display=swap');
+  :root{
+    --card:#fffdf8;--ink:#34423f;--muted:#66736f;
+    --bg:#f7efe4;--bg2:#e9f7f4;--brand:#74b7a7;--brand2:#f6b26b;
+    --accent:#ef8f8f;--pill:#f2fbf8;--pill-b:#bfe4d9;--line:#eadfce;
+    --shadow:0 12px 34px rgba(91,72,45,.14);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;color:var(--ink);
+    font:16px/1.65 "Avenir Next","IBM Plex Sans JP",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:
+      radial-gradient(circle at 8% 0%, rgba(255,210,150,.42), transparent 28%),
+      radial-gradient(circle at 94% 12%, rgba(152,220,205,.38), transparent 30%),
+      linear-gradient(180deg,var(--bg),#eef8f5 58%,#f8fbff);
+  }
+  header{
+    position:sticky;top:0;z-index:20;background:rgba(255,253,248,.9);backdrop-filter:blur(16px);
+    padding:12px clamp(10px,2vw,22px);display:flex;flex-wrap:wrap;gap:10px 12px;align-items:center;
+    border-bottom:1px solid rgba(217,202,174,.72);box-shadow:0 6px 20px rgba(90,72,46,.08)
+  }
+  button,select,label{font:600 15px/1.4 "Avenir Next","IBM Plex Sans JP",sans-serif}
+  button{
+    background:linear-gradient(135deg,var(--brand),#89cbbf);color:#fff;border:none;border-radius:999px;
+    padding:10px 16px;cursor:pointer;box-shadow:0 6px 14px rgba(94,162,146,.25)
+  }
+  button:hover{filter:brightness(1.03);transform:translateY(-1px)} button:disabled{opacity:.55;cursor:not-allowed;transform:none}
+  select{border:1px solid var(--line);border-radius:999px;padding:7px 12px;background:#fff;color:var(--ink)}
+  input[type="checkbox"]{accent-color:var(--brand)}
+  input[type="range"]{accent-color:var(--brand)}
+  input[type="text"]{border:1px solid var(--line);border-radius:10px;padding:6px 8px;background:#fff}
+  .pill{padding:4px 10px;border-radius:999px;background:var(--pill);border:1px solid var(--pill-b);box-shadow:0 2px 8px rgba(115,171,156,.12)}
   /* レイアウト */
-  #wrap{max-width:1200px;margin:12px auto;padding:0 10px;display:grid;grid-template-columns:1fr 260px;gap:12px}
-  @media (max-width:980px){ #wrap{grid-template-columns:1fr} }
-  #stage{position:relative}
+  #wrap{width:min(1220px,100%);margin:14px auto 8px;padding:0 12px;display:block}
+  #stage{position:relative;border-radius:26px}
   #stage video{display:none}
-  #stage canvas#view{width:100%;display:block;background:#000;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.1);touch-action:none}
-  #detectedBar{position:absolute;right:12px;top:12px;display:flex;gap:6px;flex-wrap:wrap;max-width:60%;pointer-events:none}
-  .chip{background:#ffffffd0;color:#333;border:1px solid var(--pill-b);border-radius:999px;padding:2px 8px;font-size:14px}
-  /* サイドパネル（テンプレート表示） */
-  #side{background:var(--card);border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.08);padding:10px}
-  #side h3{margin:4px 0 8px;font-size:16px}
-  #tplBox{background:#f7f9ff;border:1px dashed #c8d3ff;border-radius:10px;display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;max-width:100%}
+  #stage canvas#view{
+    width:100%;display:block;background:#16211f;border-radius:26px;box-shadow:var(--shadow);
+    touch-action:none;border:6px solid rgba(255,255,255,.78)
+  }
+  #detectedBar{position:absolute;right:18px;top:18px;display:flex;gap:7px;flex-wrap:wrap;max-width:56%;pointer-events:none}
+  .chip{background:rgba(255,253,248,.88);color:#4d5b57;border:1px solid var(--pill-b);border-radius:999px;padding:3px 10px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.08)}
+  #tplToggle{position:absolute;left:18px;top:18px;z-index:8;background:rgba(255,253,248,.92);color:var(--ink);border:1px solid var(--line);box-shadow:0 8px 24px rgba(0,0,0,.12)}
+  /* 映像上に浮くテンプレートカード */
+  #side{
+    position:absolute;right:18px;bottom:18px;z-index:7;width:min(320px,calc(100% - 36px));max-height:calc(100% - 92px);overflow:auto;
+    background:rgba(255,253,248,.94);backdrop-filter:blur(18px);border:1px solid rgba(232,216,190,.85);
+    border-radius:24px;box-shadow:var(--shadow);padding:14px;transition:opacity .2s ease, transform .2s ease
+  }
+  #side.collapsed{opacity:0;pointer-events:none;transform:translateY(10px) scale(.98)}
+  #side h3{margin:2px 0 10px;font-size:17px;color:#47645e}
+  #tplBox{background:#fff8ee;border:1px dashed #e6c99d;border-radius:18px;display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;max-width:100%;overflow:hidden}
   #tplThumb{max-width:100%;width:100%;height:auto;image-rendering:pixelated}
-  .meta{font-size:13px;color:#555;margin-top:6px}
-  #chart{margin:8px auto 16px;display:block;background:#fff;border-radius:12px;max-width:1200px}
-  #status{max-width:1200px;margin:0 auto 12px;color:#444;font-size:14px;padding:0 10px}
+  .meta{font-size:13px;color:var(--muted);margin-top:8px}
+  details{border-top:1px solid rgba(224,207,181,.72);padding-top:8px;margin-top:10px}
+  summary{cursor:pointer;color:#5c7c74;font-weight:700}
+  .row{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center;margin:8px 0}
+  .row input[type="range"], .row input[type="text"]{grid-column:1 / -1;width:100%}
+  #chart{
+    margin:14px 0 16px 50%;transform:translateX(-50%);display:block;background:rgba(255,253,248,.92);
+    border-radius:22px;box-shadow:var(--shadow);width:calc(100vw - 24px);max-width:none;border:1px solid rgba(232,216,190,.78)
+  }
+  #status{width:calc(100vw - 24px);margin:0 auto 12px;color:var(--muted);font-size:14px;padding:0 10px}
+  @media (max-width:720px){
+    #side{left:12px;right:12px;bottom:12px;width:auto;max-height:56%}
+    #detectedBar{display:none}
+    header{gap:8px}
+    button,select,label{font-size:14px}
+  }
 </style>
 
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
@@ -67,7 +113,7 @@
   <label>表情:
     <select id="emoMethod" disabled>
       <option value="poster">POSTER V2 / POSTER++</option>
-      <option value="emotiefflib">EmotiEffLib</option>
+      <option value="emotiefflib" selected>EmotiEffLib</option>
       <option value="off">OFF</option>
     </select>
   </label>
@@ -80,8 +126,8 @@
 <div id="stage">
   <video id="vid" playsinline muted></video>
   <canvas id="view"></canvas>
+    <button id="tplToggle" type="button">🌿 テンプレート</button>
     <div id="detectedBar"></div>
-  </div>
 
   <!-- テンプレートプレビュー -->
   <aside id="side">
@@ -147,7 +193,16 @@
         <div>同階層に <code>poster_v2.onnx</code> または <code>emotiefflib.onnx</code> を置くと、顔枠から表情を推論してグラフとCSVへ記録します。</div>
       </div>
     </details>
+    <details>
+      <summary>🧭 追跡アルゴリズムの根拠</summary>
+      <div class="meta">
+        <div>明るさ変化には局所正規化相関と勾配特徴を併用し、背景への飛びを応答ピーク信頼度で抑えています。</div>
+        <div>カルマンフィルタは観測信頼度に応じて観測ノイズを変える適応型にしています。</div>
+        <div>参考: <a href="https://arxiv.org/abs/1906.01551" target="_blank" rel="noreferrer">illumination/rotation robust correlation tracking</a>、<a href="https://arxiv.org/abs/1802.03098" target="_blank" rel="noreferrer">noise-robust tracking survey</a>、<a href="https://arxiv.org/abs/2112.12082" target="_blank" rel="noreferrer">adaptive Kalman noise estimation</a></div>
+      </div>
+    </details>
   </aside>
+  </div>
 </div>
 
 <canvas id="chart" height="280"></canvas>
@@ -187,6 +242,8 @@ const chart  = document.getElementById('chart');
 const cctx   = chart.getContext('2d');
 const status = document.getElementById('status');
 const detectedBar = document.getElementById('detectedBar');
+const tplToggle = document.getElementById('tplToggle');
+const sidePanel = document.getElementById('side');
 
 const tplThumb = document.getElementById('tplThumb');
 const tplCtx   = tplThumb.getContext('2d');
@@ -261,6 +318,10 @@ if (useKalmanEl) {
     P.useKalman = e.target.checked;
   });
 }
+tplToggle.addEventListener('click', ()=>{
+  sidePanel.classList.toggle('collapsed');
+  tplToggle.textContent = sidePanel.classList.contains('collapsed') ? '🌿 テンプレートを表示' : '🌿 テンプレート';
+});
 
 const tplSizeEl= document.getElementById('tplSize');
 const tplScoreEl=document.getElementById('tplScore');
@@ -287,6 +348,7 @@ let lastTgt   = null;
 let inferTimer = null;
 let inferBusy = false;
 let chartTimer = null;
+let lastInferAt = 0;
 
 /* ===== カメラ：開始/停止/再起動 + ウォッチドッグ ===== */
 function cameraErrorMessage(e){
@@ -450,7 +512,7 @@ function pushData(x,y,emotion=null){
 }
 function resetData(){ series=[]; records=[]; }
 function drawNiceChart(){
-  const canvasWidth = view.getBoundingClientRect().width;
+  const canvasWidth = Math.max(view.getBoundingClientRect().width, window.innerWidth - 24);
   chart.style.width = canvasWidth + 'px';
   const w=chart.width = Math.max(480, canvasWidth);
   const h=chart.height;
@@ -798,6 +860,22 @@ function toGray(rgba, w, h){
   }
   return g;
 }
+// 明るさ変化に強い追跡特徴。輝度にSobel風の勾配量を混ぜ、NCC側で局所正規化する。
+function makeTrackFeature(gray,w,h){
+  const out=new Float32Array(w*h);
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      const i=y*w+x;
+      const gx=(gray[i+1]-gray[i-1])*0.5;
+      const gy=(gray[i+w]-gray[i-w])*0.5;
+      const grad=Math.min(1, Math.sqrt(gx*gx+gy*gy)*4.0);
+      out[i]=0.58*gray[i] + 0.42*grad;
+    }
+  }
+  for(let x=0;x<w;x++){ out[x]=gray[x]; out[(h-1)*w+x]=gray[(h-1)*w+x]; }
+  for(let y=0;y<h;y++){ out[y*w]=gray[y*w]; out[y*w+w-1]=gray[y*w+w-1]; }
+  return out;
+}
 function normalizeTemplate(g){
   const n=g.length;
   let mean=0; for(let i=0;i<n;i++) mean+=g[i]; mean/=n;
@@ -822,6 +900,7 @@ function ncc(frame, fw, fh, x, y, temp, tw, th){
   const frameEnergy=sumF2-(sumF*sumF/n);
   return frameEnergy>1e-9 ? cross/Math.sqrt(frameEnergy) : -1;
 }
+function clamp01(v){ return Math.max(0,Math.min(1,v)); }
 function resampleGray(src, sw, sh, dw, dh){
   const dst = new Float32Array(dw*dh);
   for(let j=0;j<dh;j++){
@@ -850,27 +929,30 @@ const tpl = {
   have:false,
   kf: new KalmanCV(),
   lastTs: null,
+  confidence: 0,
+  lost: 0,
 
   capture(x,y,w,h){
     if(w<8 || h<8){ status.textContent='選択が小さすぎます（8px以上）'; return false; }
     drawPreviewFromView(x,y,w,h);
     const img = vctx.getImageData(Math.round(x),Math.round(y),Math.round(w),Math.round(h));
     this.w = img.width; this.h = img.height;
-    this.gray = normalizeTemplate(toGray(img.data, this.w, this.h));
+    this.gray = normalizeTemplate(makeTrackFeature(toGray(img.data, this.w, this.h), this.w, this.h));
     this.x = x; this.y = y; this.cx = x + this.w/2; this.cy = y + this.h/2;
     this.kf = new KalmanCV(); this.kf.set(this.cx, this.cy); this.lastTs = performance.now()/1000;
+    this.confidence=1; this.lost=0;
     this.have=true; tplSizeEl.textContent = `${this.w}×${this.h}px`; tplScoreEl.textContent = '—';
     status.textContent=`テンプレート設定：${this.w}×${this.h}px`;
     return true;
   },
 
-  search(frameGray, fw, fh){
+  search(frameFeat, fw, fh){
     if(!this.have) return null;
     const ts = performance.now()/1000;
     const dt = (this.lastTs!=null)? Math.min(0.2, ts - this.lastTs) : 1/30;
     this.lastTs = ts;
 
-    let bestScore=-2, bestX=this.x, bestY=this.y, bestScale=1.0;
+    let bestScore=-2, secondScore=-2, bestX=this.x, bestY=this.y, bestScale=1.0;
 
     // 検索中心・半径
     let pcx = this.cx, pcy = this.cy, R = 80; // Kalman無効時
@@ -879,7 +961,8 @@ const tpl = {
       pcx = this.kf.cx; pcy = this.kf.cy;
       const sigma = Math.sqrt(this.kf.P[0] + this.kf.P[5]);
       const sizeBase = Math.max(48, Math.min(this.w,this.h)*0.65);
-      R = Math.max(sizeBase, Math.min(220, sizeBase*P.radiusMul + sigma));
+      const lostBoost = 1 + Math.min(1.2, this.lost*0.12);
+      R = Math.max(sizeBase, Math.min(240, (sizeBase*P.radiusMul + sigma) * lostBoost));
     }
 
     // マルチスケール探索（UIの P.scales を使用）
@@ -898,11 +981,11 @@ const tpl = {
       }
 
       // 大きいテンプレートは2～3px刻みで粗探索し、最良点の周囲だけ1px刻みで詰める。
-      const step = tw*th>18000 ? 3 : (tw*th>5000 ? 2 : 1);
+      const step = tw*th>18000 ? 4 : (tw*th>7000 ? 3 : (tw*th>2500 ? 2 : 1));
       let scaleBest=-2, scaleX=X0, scaleY=Y0;
       for(let yy=Y0; yy<=Y1; yy+=step){
         for(let xx=X0; xx<=X1; xx+=step){
-          const s = ncc(frameGray, fw, fh, xx, yy, tgray, tw, th);
+          const s = ncc(frameFeat, fw, fh, xx, yy, tgray, tw, th);
           if(s>scaleBest){ scaleBest=s; scaleX=xx; scaleY=yy; }
         }
       }
@@ -910,20 +993,28 @@ const tpl = {
         const rx0=Math.max(X0,scaleX-step), rx1=Math.min(X1,scaleX+step);
         const ry0=Math.max(Y0,scaleY-step), ry1=Math.min(Y1,scaleY+step);
         for(let yy=ry0;yy<=ry1;yy++) for(let xx=rx0;xx<=rx1;xx++){
-          const s=ncc(frameGray,fw,fh,xx,yy,tgray,tw,th);
+          const s=ncc(frameFeat,fw,fh,xx,yy,tgray,tw,th);
           if(s>scaleBest){ scaleBest=s; scaleX=xx; scaleY=yy; }
         }
       }
-      if(scaleBest>bestScore){ bestScore=scaleBest; bestX=scaleX; bestY=scaleY; bestScale=sc; }
+      if(scaleBest>bestScore){ secondScore=bestScore; bestScore=scaleBest; bestX=scaleX; bestY=scaleY; bestScale=sc; }
+      else if(scaleBest>secondScore){ secondScore=scaleBest; }
     }
 
     // 位置更新
     const mcx = bestX + (this.w*bestScale)/2;
     const mcy = bestY + (this.h*bestScale)/2;
 
-    const accepted = bestScore >= P.keep;
+    const peakGap = bestScore - secondScore;
+    const scorePart = clamp01((bestScore - P.keep) / Math.max(0.12, 1 - P.keep));
+    const peakPart = clamp01(peakGap / 0.055);
+    const confidence = clamp01(0.68*scorePart + 0.32*peakPart);
+    this.confidence = 0.70*this.confidence + 0.30*confidence;
+    const accepted = bestScore >= P.keep && (peakGap > 0.012 || bestScore > P.update);
+    this.lost = accepted ? 0 : this.lost + 1;
     if (P.useKalman && accepted) {
-      const Rscale = (bestScore>0.90)? 0.5 : (bestScore>0.75)? 1.0 : (bestScore>0.55)? 3.0 : 8.0;
+      // 応答ピークが曖昧なときは観測ノイズを大きくし、Kalman予測を優先する。
+      const Rscale = 0.45 + (1-confidence)*9.0 + Math.min(4, this.lost);
       this.kf.update(mcx, mcy, Rscale);
       this.cx = this.kf.cx; this.cy = this.kf.cy;
     } else if(!P.useKalman && accepted) {
@@ -940,17 +1031,17 @@ const tpl = {
     // 良好時のみテンプレ微更新
     const innovation = Math.hypot(pcx - mcx, pcy - mcy);
     const pixGate = Math.max(2, Math.min(this.w, this.h) * 0.05); // テンプレの5%か2pxの大きい方
-    if(bestScore >= Math.max(P.update,0.82) && bestScale > 0.98 && bestScale < 1.02 && innovation < pixGate){
-      const patch = cropGray(frameGray, fw, fh, Math.round(this.x), Math.round(this.y), this.w, this.h);
+    if(accepted && confidence>0.62 && bestScore >= Math.max(P.update,0.82) && bestScale > 0.98 && bestScale < 1.02 && innovation < pixGate){
+      const patch = cropGray(frameFeat, fw, fh, Math.round(this.x), Math.round(this.y), this.w, this.h);
       if(patch){
         normalizeTemplate(patch);
-        const alpha = 0.025;
+        const alpha = 0.012 + 0.025*confidence;
         for(let i=0;i<this.gray.length;i++) this.gray[i] = (1-alpha)*this.gray[i] + alpha*patch[i];
         normalizeTemplate(this.gray);
       }
     }
 
-    tplScoreEl.textContent = bestScore.toFixed(2);
+    tplScoreEl.textContent = `${bestScore.toFixed(2)} / conf ${this.confidence.toFixed(2)}`;
     return { x:this.x, y:this.y, w:this.w*outputScale, h:this.h*outputScale, score:bestScore, cls:'template', id:1 };
   },
 
@@ -958,6 +1049,7 @@ const tpl = {
     this.have=false;
     this.gray=null;
     this.kf=new KalmanCV();
+    this.confidence=0; this.lost=0;
     tplCtx.clearRect(0,0,tplThumb.width,tplThumb.height);
     tplSizeEl.textContent='–';
     tplScoreEl.textContent='–';
@@ -1030,13 +1122,13 @@ async function doInferenceOnce(){
   // --- テンプレート追跡 ---
   if(mode === 'template'){
     const frame = vctx.getImageData(0,0,view.width,view.height);
-    const frameGray = toGray(frame.data, view.width, view.height);
+    const frameFeat = makeTrackFeature(toGray(frame.data, view.width, view.height), view.width, view.height);
 
     let boxes = [];
     let b = null;
 
     if(tpl.have){
-      b = tpl.search(frameGray, view.width, view.height);
+      b = tpl.search(frameFeat, view.width, view.height);
       if (b) boxes = [b];
 
       if (b && b.score >= P.keep){
@@ -1294,6 +1386,14 @@ async function doYoloInference(){
   return yoloBoxes;
 }
 
+function desiredInferInterval(){
+  const mode=modeSel.value;
+  if(mode==='template') return 70;
+  if(mode==='device-face') return 120;
+  if(mode==='yolo-face') return emoMethodSel.value==='off' ? 110 : 150;
+  return 170;
+}
+
 /* ===== 起動/操作 ===== */
 startBtn.onclick = async ()=>{
   try{
@@ -1318,13 +1418,16 @@ startBtn.onclick = async ()=>{
     if(inferTimer) clearInterval(inferTimer);
     inferTimer = setInterval(async ()=>{
       if(paused || inferBusy) return;
+      const now=performance.now();
+      if(now-lastInferAt < desiredInferInterval()) return;
+      lastInferAt=now;
       inferBusy=true;
       try { await doInferenceOnce(); }
       catch(e){ console.error(e); status.textContent='推論エラー: '+(e.message||e); }
       finally { inferBusy=false; }
-    }, 80);
+    }, 35);
     if(chartTimer) clearInterval(chartTimer);
-    chartTimer = setInterval(()=>{ if(!paused) drawNiceChart(); }, 100);
+    chartTimer = setInterval(()=>{ if(!paused) drawNiceChart(); }, 180);
   }catch(e){
     console.error(e);
     stopCamera();

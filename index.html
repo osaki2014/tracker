@@ -201,7 +201,9 @@ const EMOTION_METHOD_NAMES = {
   poster: 'POSTER V2 / POSTER++',
   emotiefflib: 'EmotiEffLib'
 };
-const EMOTION_LABELS = ['neutral','happy','sad','surprise','fear','disgust','anger','contempt'];
+// EmotiEffLib公式 affectnet_labels.txt:
+// 0:Anger, 1:Contempt, 2:Disgust, 3:Fear, 4:Happiness, 5:Neutral, 6:Sadness, 7:Surprise
+const EMOTION_LABELS = ['anger','contempt','disgust','fear','happy','neutral','sad','surprise'];
 const EMOTION_COLORS = {
   neutral:'#666', happy:'#00a878', sad:'#3b82f6', surprise:'#f59e0b',
   fear:'#8b5cf6', disgust:'#84cc16', anger:'#ef4444', contempt:'#64748b'

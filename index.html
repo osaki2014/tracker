@@ -24,6 +24,14 @@
     padding:12px clamp(10px,2vw,22px);display:flex;flex-wrap:wrap;gap:10px 12px;align-items:center;
     border-bottom:1px solid rgba(217,202,174,.72);box-shadow:0 6px 20px rgba(90,72,46,.08)
   }
+  .appTitle{
+    display:inline-flex;align-items:baseline;gap:8px;margin-right:2px;padding:6px 10px;
+    color:#46625b;font-weight:800;letter-spacing:.02em
+  }
+  .appTitle .ver{
+    font-size:11px;font-weight:700;color:#8a9b96;background:#f2fbf8;border:1px solid var(--pill-b);
+    border-radius:999px;padding:1px 7px
+  }
   button,select,label{font:600 15px/1.4 "Avenir Next","IBM Plex Sans JP",sans-serif}
   button{
     background:linear-gradient(135deg,var(--brand),#89cbbf);color:#fff;border:none;border-radius:999px;
@@ -89,6 +97,7 @@
 </script>
 
 <header>
+  <div class="appTitle">memo <span class="ver">v2026.07.09.4</span></div>
   <button id="start">▶ カメラ開始</button>
   <button id="pause" disabled>⏸ 一時停止</button>
   <button id="reset" disabled>🧹 データリセット</button>
@@ -137,11 +146,11 @@
 <div id="stage">
   <video id="vid" playsinline muted></video>
   <canvas id="view"></canvas>
-    <button id="tplToggle" type="button">🌿 テンプレート</button>
+    <button id="tplToggle" type="button">🌿 テンプレートを表示</button>
     <div id="detectedBar"></div>
 
   <!-- テンプレートプレビュー -->
-  <aside id="side">
+  <aside id="side" class="collapsed">
     <h3>テンプレート</h3>
     <div id="tplBox">
       <canvas id="tplThumb" width="240" height="180"></canvas>
@@ -699,6 +708,16 @@ function updateRecordBadges(){
   videoRecInfo.className='recInfo '+(vState==='recording'?'active':(vState==='paused'?'paused':(mediaRecordState.videoBlob?'saved':'')));
   audioRecInfo.className='recInfo '+(aState==='recording'?'active':(aState==='paused'?'paused':(mediaRecordState.audioBlob?'saved':'')));
 }
+function seriesForVisibleRange(data,tMin,tMax){
+  if(data.length<2) return data.filter(p=>p.t>=tMin && p.t<=tMax);
+  let first=data.findIndex(p=>p.t>=tMin);
+  if(first<0) first=data.length-1;
+  let last=first;
+  while(last<data.length && data[last].t<=tMax) last++;
+  const start=Math.max(0,first-1);
+  const end=Math.min(data.length,last+1);
+  return data.slice(start,end);
+}
 function drawNiceChart(){
   const canvasWidth = Math.max(view.getBoundingClientRect().width, window.innerWidth - 24);
   chart.style.width = canvasWidth + 'px';
@@ -734,19 +753,29 @@ function drawNiceChart(){
   cctx.save(); cctx.translate(18, h/2+24); cctx.rotate(-Math.PI/2); cctx.fillText('画素座標 (x=青 / y=黄)', 0, 0); cctx.restore();
 
   if(series.length>=2){
-    const recent=series.filter(p=>p.t>=tMin && p.t<=tMax);
+    const recent=seriesForVisibleRange(series,tMin,tMax);
     if(recent.length>=2){
       const xS=t=>L+(w-L-R)*(t-tMin)/(tMax-tMin);
-    const ySX=v=>T+(h-T-B)*(1 - v/W);
+      const ySX=v=>T+(h-T-B)*(1 - v/W);
       const ySY=v=>T+(h-T-B)*(1 - v/H);
+      cctx.save();
+      cctx.beginPath();
+      cctx.rect(L,T,w-L-R,h-T-B);
+      cctx.clip();
       cctx.beginPath(); cctx.lineWidth=3; cctx.strokeStyle='#0a68ff';
       recent.forEach((p,i)=>{const X=xS(p.t),Y=ySX(p.x); if(i==0)cctx.moveTo(X,Y); else cctx.lineTo(X,Y);}); cctx.stroke();
       cctx.fillStyle='#0a68ff';
-      for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){const X=xS(recent[i].t),Y=ySX(recent[i].x); cctx.beginPath(); cctx.arc(X,Y,2.5,0,2*Math.PI); cctx.fill();}
+      for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){
+        if(recent[i].t<tMin || recent[i].t>tMax) continue;
+        const X=xS(recent[i].t),Y=ySX(recent[i].x); cctx.beginPath(); cctx.arc(X,Y,2.5,0,2*Math.PI); cctx.fill();
+      }
       cctx.beginPath(); cctx.setLineDash([6,6]); cctx.lineWidth=3; cctx.strokeStyle='#f6a000';
       recent.forEach((p,i)=>{const X=xS(p.t),Y=ySY(p.y); if(i==0)cctx.moveTo(X,Y); else cctx.lineTo(X,Y);}); cctx.stroke(); cctx.setLineDash([]);
       cctx.fillStyle='#f6a000';
-      for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){const X=xS(recent[i].t),Y=ySY(recent[i].y); cctx.fillRect(X-2,Y-2,4,4);}
+      for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){
+        if(recent[i].t<tMin || recent[i].t>tMax) continue;
+        const X=xS(recent[i].t),Y=ySY(recent[i].y); cctx.fillRect(X-2,Y-2,4,4);
+      }
       const drawMetric=(enabled,key,color,label,min,max,dash=[])=>{
         if(!enabled) return;
         const pts=recent.filter(p=>p[key]!=='' && p[key]!=null && isFinite(+p[key]));
@@ -766,6 +795,7 @@ function drawNiceChart(){
       cctx.font='12px -apple-system,system-ui';
       let lastEmotion='', lastLabelT=-999;
       recent.forEach(p=>{
+        if(p.t<tMin || p.t>tMax) return;
         if(!p.emotion) return;
         if(p.emotion!==lastEmotion || p.t-lastLabelT>1.0){
           const X=xS(p.t), Y=ySY(p.y);
@@ -780,6 +810,7 @@ function drawNiceChart(){
           lastEmotion=p.emotion; lastLabelT=p.t;
         }
       });
+      cctx.restore();
     }
   }
 }

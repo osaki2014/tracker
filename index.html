@@ -37,6 +37,7 @@
   .pill{padding:4px 10px;border-radius:999px;background:var(--pill);border:1px solid var(--pill-b);box-shadow:0 2px 8px rgba(115,171,156,.12)}
   .recInfo{display:inline-block;margin-left:6px;padding:2px 7px;border-radius:999px;background:#fff8ee;border:1px solid #eadfce;color:#7b6b58;font-size:12px;font-weight:700}
   .recInfo.active{background:#e9fff5;color:#24745f;border-color:#a8decf}
+  .recInfo.paused{background:#fff7d9;color:#8a6500;border-color:#edd37d}
   .recInfo.saved{background:#eef5ff;color:#35618e;border-color:#c8d9f5}
   /* レイアウト */
   #wrap{width:min(1220px,100%);margin:14px auto 8px;padding:0 12px;display:block}
@@ -313,10 +314,13 @@ const mediaRecordState = {
   videoChunks:[], audioChunks:[],
   videoUrl:null, audioUrl:null,
   videoBlob:null, audioBlob:null,
-  startPerf:0, videoStartPerf:0, audioStartPerf:0,
-  replayVideo:null
+  discardVideoOnStop:false, discardAudioOnStop:false,
+  startPerf:0, pausedAccumMs:0, pauseStartedPerf:0,
+  videoStartPerf:0, audioStartPerf:0,
+  replayVideo:null,
+  frameSnapshots:[], lastSnapshotTs:0
 };
-const chartState = { viewEnd:null, drag:false, dragX:0, dragEnd:0, render:null };
+const chartState = { viewEnd:null, windowSec:10, drag:false, dragX:0, dragEnd:0, render:null };
 let reviewingFrame=false;
 /* ▼▼ スライダ値（いつでも変更可能） */
 const P = {
@@ -532,13 +536,30 @@ emoMethodSel.addEventListener('change', ()=>{
 });
 plotSpeechChk.addEventListener('change', ()=>{ if(plotSpeechChk.checked) ensureAudio(); });
 plotVolumeChk.addEventListener('change', ()=>{ if(plotVolumeChk.checked) ensureAudio(); });
-recordVideoChk.addEventListener('change', async ()=>{ if(recordVideoChk.checked) recChk.checked=true; recordVideoChk.checked ? await startVideoRecording() : await stopVideoRecording(); });
-recordAudioChk.addEventListener('change', async ()=>{ if(recordAudioChk.checked) recChk.checked=true; recordAudioChk.checked ? await startAudioRecording() : await stopAudioRecording(); });
+recordVideoChk.addEventListener('change', async ()=>{
+  if(recordVideoChk.checked){
+    recChk.checked=true;
+    if(running && !paused) await startVideoRecording();
+  }else{
+    await stopVideoRecording();
+  }
+  updateRecordBadges();
+});
+recordAudioChk.addEventListener('change', async ()=>{
+  if(recordAudioChk.checked){
+    recChk.checked=true;
+    if(running && !paused) await startAudioRecording();
+  }else{
+    await stopAudioRecording();
+  }
+  updateRecordBadges();
+});
 chart.addEventListener('wheel', e=>{
   if(!paused || !series.length) return;
   e.preventDefault();
   const dataStart=series[0].t, dataEnd=series[series.length-1].t;
-  const minEnd=Math.min(dataEnd,dataStart+10);
+  const span=chartState.windowSec || 10;
+  const minEnd=Math.min(dataEnd,dataStart+span);
   chartState.viewEnd = chartState.viewEnd ?? dataEnd;
   chartState.viewEnd += Math.sign(e.deltaY)*1.0;
   chartState.viewEnd = Math.max(minEnd, Math.min(dataEnd, chartState.viewEnd));
@@ -546,14 +567,16 @@ chart.addEventListener('wheel', e=>{
 },{passive:false});
 chart.addEventListener('pointerdown', e=>{
   if(!paused || !series.length) return;
-  chartState.drag=true; chartState.dragX=e.clientX; chartState.dragEnd=chartState.viewEnd ?? series[series.length-1].t;
+  chartState.viewEnd = chartState.viewEnd ?? series[series.length-1].t;
+  chartState.drag=true; chartState.dragX=e.clientX; chartState.dragEnd=chartState.viewEnd;
 });
 window.addEventListener('pointermove', e=>{
   if(!chartState.drag) return;
   const r=chartState.render; if(!r) return;
   const secPerPx=(r.tMax-r.tMin)/(r.w-r.L-r.R);
   const dataStart=series[0].t, dataEnd=series[series.length-1].t;
-  const minEnd=Math.min(dataEnd,dataStart+10);
+  const span=chartState.windowSec || 10;
+  const minEnd=Math.min(dataEnd,dataStart+span);
   chartState.viewEnd = Math.max(minEnd, Math.min(dataEnd, chartState.dragEnd - (e.clientX-chartState.dragX)*secPerPx));
   drawNiceChart();
 });
@@ -579,9 +602,10 @@ function meterVideo(){
 /* ===== グラフ ===== */
 function pushData(x,y,emotion=null,faceMetrics=null,audioMetrics=null){
   const t=(performance.now()/1000).toFixed(2);
-  const mediaTime = mediaRecordState.startPerf ? (performance.now()-mediaRecordState.startPerf)/1000 : '';
+  const tNum=+t;
+  const mediaTime = currentMediaTime();
   series.push({
-    t:+t,x,y,
+    t:tNum,x,y,
     mediaTime,
     emotion: emotion?.label || '',
     emotionScore: emotion?.score || '',
@@ -595,34 +619,85 @@ function pushData(x,y,emotion=null,faceMetrics=null,audioMetrics=null){
     speech: audioMetrics?.speech ?? '',
     volumeDb: audioMetrics?.volumeDb ?? ''
   });
+  if(recordVideoChk.checked) captureFrameSnapshot(tNum, mediaTime);
 }
 function resetData(){
-  series=[]; records=[]; chartState.viewEnd=null; reviewingFrame=false;
+  series=[]; records=[]; mediaRecordState.frameSnapshots=[]; mediaRecordState.lastSnapshotTs=0;
+  chartState.viewEnd=null; chartState.windowSec=10; reviewingFrame=false;
   status.textContent='データリセット済み：新しい記録を開始できます。録画/録音ファイルは保存済みであれば保持されています。';
   drawNiceChart();
 }
-function currentMediaTime(){ return mediaRecordState.startPerf && anyRecorderActive() ? (performance.now()-mediaRecordState.startPerf)/1000 : ''; }
+const snapCanvas=document.createElement('canvas');
+const snapCtx=snapCanvas.getContext('2d');
+function captureFrameSnapshot(t, mediaTime){
+  if(!vid || vid.readyState<2) return;
+  if(t - mediaRecordState.lastSnapshotTs < 0.5) return;
+  mediaRecordState.lastSnapshotTs=t;
+  const sw=320, sh=Math.max(1,Math.round(sw*H/W));
+  snapCanvas.width=sw; snapCanvas.height=sh;
+  try{
+    snapCtx.drawImage(vid,0,0,sw,sh);
+    mediaRecordState.frameSnapshots.push({t,mediaTime,data:snapCanvas.toDataURL('image/jpeg',0.68)});
+    if(mediaRecordState.frameSnapshots.length>900) mediaRecordState.frameSnapshots.shift();
+  }catch(e){}
+}
+function nearestSnapshot(t){
+  const snaps=mediaRecordState.frameSnapshots;
+  if(!snaps.length) return null;
+  let best=snaps[0], bestD=Math.abs(snaps[0].t-t);
+  for(const s of snaps){
+    const d=Math.abs(s.t-t);
+    if(d<bestD){ best=s; bestD=d; }
+  }
+  return bestD<=1.2 ? best : null;
+}
+function startMediaClockIfNeeded(){
+  if(!mediaRecordState.startPerf){
+    mediaRecordState.startPerf=performance.now();
+    mediaRecordState.pausedAccumMs=0;
+    mediaRecordState.pauseStartedPerf=0;
+  }
+}
+function pauseMediaClock(){
+  if(mediaRecordState.startPerf && !mediaRecordState.pauseStartedPerf) mediaRecordState.pauseStartedPerf=performance.now();
+}
+function resumeMediaClock(){
+  if(mediaRecordState.pauseStartedPerf){
+    mediaRecordState.pausedAccumMs += performance.now() - mediaRecordState.pauseStartedPerf;
+    mediaRecordState.pauseStartedPerf=0;
+  }
+}
+function currentMediaTime(){
+  if(!mediaRecordState.startPerf || !anyRecorderActive()) return '';
+  const pausedNow = mediaRecordState.pauseStartedPerf ? performance.now() - mediaRecordState.pauseStartedPerf : 0;
+  return Math.max(0,(performance.now() - mediaRecordState.startPerf - mediaRecordState.pausedAccumMs - pausedNow)/1000);
+}
 function timeCodeFromPerf(perf){
   if(!perf) return '未記録';
   const d=new Date(performance.timeOrigin + perf);
   const pad=(n,w=2)=>String(n).padStart(w,'0');
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}`;
 }
-function formatRecInfo(startPerf, active, saved){
-  if(active){
+function formatRecInfo(startPerf, state, saved, armed=false){
+  if(state==='recording'){
     const elapsed=(performance.now()-startPerf)/1000;
     return `${timeCodeFromPerf(startPerf)} / ${elapsed.toFixed(1)}s`;
   }
+  if(state==='paused'){
+    const elapsed=(performance.now()-startPerf)/1000;
+    return `一時停止 ${timeCodeFromPerf(startPerf)} / ${elapsed.toFixed(1)}s`;
+  }
   if(saved) return `保存済み ${timeCodeFromPerf(startPerf)}`;
+  if(armed) return '待機中';
   return '未記録';
 }
 function updateRecordBadges(){
-  const vActive=!!(mediaRecordState.videoRecorder && mediaRecordState.videoRecorder.state!=='inactive');
-  const aActive=!!(mediaRecordState.audioRecorder && mediaRecordState.audioRecorder.state!=='inactive');
-  videoRecInfo.textContent=formatRecInfo(mediaRecordState.videoStartPerf,vActive,!!mediaRecordState.videoBlob);
-  audioRecInfo.textContent=formatRecInfo(mediaRecordState.audioStartPerf,aActive,!!mediaRecordState.audioBlob);
-  videoRecInfo.className='recInfo '+(vActive?'active':(mediaRecordState.videoBlob?'saved':''));
-  audioRecInfo.className='recInfo '+(aActive?'active':(mediaRecordState.audioBlob?'saved':''));
+  const vState=mediaRecordState.videoRecorder?.state || 'inactive';
+  const aState=mediaRecordState.audioRecorder?.state || 'inactive';
+  videoRecInfo.textContent=formatRecInfo(mediaRecordState.videoStartPerf,vState,!!mediaRecordState.videoBlob,recordVideoChk.checked);
+  audioRecInfo.textContent=formatRecInfo(mediaRecordState.audioStartPerf,aState,!!mediaRecordState.audioBlob,recordAudioChk.checked);
+  videoRecInfo.className='recInfo '+(vState==='recording'?'active':(vState==='paused'?'paused':(mediaRecordState.videoBlob?'saved':'')));
+  audioRecInfo.className='recInfo '+(aState==='recording'?'active':(aState==='paused'?'paused':(mediaRecordState.audioBlob?'saved':'')));
 }
 function drawNiceChart(){
   const canvasWidth = Math.max(view.getBoundingClientRect().width, window.innerWidth - 24);
@@ -630,11 +705,19 @@ function drawNiceChart(){
   const w=chart.width = Math.max(480, canvasWidth);
   const h=chart.height;
   cctx.clearRect(0,0,w,h);
-  const L=64,R=24,T=24,B=64, MAX_SEC=10;
+  const L=64,R=24,T=24,B=64, DEFAULT_SEC=10;
   const dataEnd = series.length ? series[series.length-1].t : performance.now()/1000;
   const liveNow = performance.now()/1000;
-  const now = paused && series.length ? (chartState.viewEnd ?? dataEnd) : liveNow;
-  const tMin = now - MAX_SEC, tMax = now;
+  let tMin, tMax;
+  if(series.length>=2 && chartState.viewEnd==null){
+    tMin=series[0].t;
+    tMax=Math.max(series[series.length-1].t, tMin+1);
+  }else{
+    const now = paused && series.length ? (chartState.viewEnd ?? dataEnd) : liveNow;
+    const span = chartState.windowSec || DEFAULT_SEC;
+    tMin = now - span;
+    tMax = now;
+  }
   chartState.render={L,R,T,B,w,h,tMin,tMax};
 
   cctx.strokeStyle='#e8ecff';
@@ -651,7 +734,7 @@ function drawNiceChart(){
   cctx.save(); cctx.translate(18, h/2+24); cctx.rotate(-Math.PI/2); cctx.fillText('画素座標 (x=青 / y=黄)', 0, 0); cctx.restore();
 
   if(series.length>=2){
-    const recent=series.filter(p=>p.t>=tMin);
+    const recent=series.filter(p=>p.t>=tMin && p.t<=tMax);
     if(recent.length>=2){
       const xS=t=>L+(w-L-R)*(t-tMin)/(tMax-tMin);
     const ySX=v=>T+(h-T-B)*(1 - v/W);
@@ -970,7 +1053,15 @@ function downloadBlob(blob, name){
   return url;
 }
 async function startVideoRecording(){
-  if(mediaRecordState.videoRecorder || !camStream) return;
+  if(mediaRecordState.videoRecorder){
+    if(mediaRecordState.videoRecorder.state==='paused'){
+      resumeMediaClock();
+      mediaRecordState.videoRecorder.resume();
+    }
+    updateRecordBadges();
+    return;
+  }
+  if(!camStream) return;
   const tracks=[...camStream.getVideoTracks()];
   if(recordAudioChk.checked){
     await ensureAudio();
@@ -979,16 +1070,23 @@ async function startVideoRecording(){
   const stream=new MediaStream(tracks);
   const mime=bestMime(['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']);
   mediaRecordState.videoChunks=[];
-  if(!anyRecorderActive()) mediaRecordState.startPerf=performance.now();
+  startMediaClockIfNeeded();
   mediaRecordState.videoStartPerf=performance.now();
   mediaRecordState.videoRecorder=new MediaRecorder(stream, mime?{mimeType:mime}:{});
   mediaRecordState.videoRecorder.ondataavailable=e=>{ if(e.data&&e.data.size) mediaRecordState.videoChunks.push(e.data); };
   mediaRecordState.videoRecorder.onstop=()=>{
+    if(mediaRecordState.discardVideoOnStop){
+      mediaRecordState.videoChunks=[];
+      mediaRecordState.videoBlob=null;
+      mediaRecordState.videoRecorder=null;
+      mediaRecordState.discardVideoOnStop=false;
+      updateRecordBadges();
+      return;
+    }
     const blob=new Blob(mediaRecordState.videoChunks,{type:mime||'video/webm'});
     mediaRecordState.videoBlob=blob;
     downloadBlob(blob,'camera_record.webm');
     mediaRecordState.videoRecorder=null;
-    recordVideoChk.checked=false;
     updateRecordBadges();
     status.textContent='録画を保存しました。グラフをクリックすると録画フレームを表示できます。';
   };
@@ -1001,21 +1099,35 @@ async function stopVideoRecording(){
   if(r && r.state!=='inactive') r.stop();
 }
 async function startAudioRecording(){
-  if(mediaRecordState.audioRecorder) return;
+  if(mediaRecordState.audioRecorder){
+    if(mediaRecordState.audioRecorder.state==='paused'){
+      resumeMediaClock();
+      mediaRecordState.audioRecorder.resume();
+    }
+    updateRecordBadges();
+    return;
+  }
   await ensureAudio();
   if(!audioState.stream) return;
   const mime=bestMime(['audio/webm;codecs=opus','audio/webm']);
   mediaRecordState.audioChunks=[];
-  if(!anyRecorderActive()) mediaRecordState.startPerf=performance.now();
+  startMediaClockIfNeeded();
   mediaRecordState.audioStartPerf=performance.now();
   mediaRecordState.audioRecorder=new MediaRecorder(audioState.stream,mime?{mimeType:mime}:{});
   mediaRecordState.audioRecorder.ondataavailable=e=>{ if(e.data&&e.data.size) mediaRecordState.audioChunks.push(e.data); };
   mediaRecordState.audioRecorder.onstop=()=>{
+    if(mediaRecordState.discardAudioOnStop){
+      mediaRecordState.audioChunks=[];
+      mediaRecordState.audioBlob=null;
+      mediaRecordState.audioRecorder=null;
+      mediaRecordState.discardAudioOnStop=false;
+      updateRecordBadges();
+      return;
+    }
     const blob=new Blob(mediaRecordState.audioChunks,{type:mime||'audio/webm'});
     mediaRecordState.audioBlob=blob;
     downloadBlob(blob,'audio_record.webm');
     mediaRecordState.audioRecorder=null;
-    recordAudioChk.checked=false;
     updateRecordBadges();
   };
   mediaRecordState.audioRecorder.start(1000);
@@ -1026,6 +1138,45 @@ async function stopAudioRecording(){
   const r=mediaRecordState.audioRecorder;
   if(r && r.state!=='inactive') r.stop();
 }
+function pauseMediaRecorders(){
+  const v=mediaRecordState.videoRecorder;
+  const a=mediaRecordState.audioRecorder;
+  if((v && v.state==='recording') || (a && a.state==='recording')) pauseMediaClock();
+  if(v && v.state==='recording') v.pause();
+  if(a && a.state==='recording') a.pause();
+  updateRecordBadges();
+}
+async function resumeOrStartMediaRecorders(){
+  if((recordVideoChk.checked && mediaRecordState.videoRecorder?.state==='paused') ||
+     (recordAudioChk.checked && mediaRecordState.audioRecorder?.state==='paused')) resumeMediaClock();
+  if(recordVideoChk.checked) await startVideoRecording();
+  if(recordAudioChk.checked) await startAudioRecording();
+  updateRecordBadges();
+}
+async function resetRecordings(){
+  const hasVideoRecorder=!!(mediaRecordState.videoRecorder && mediaRecordState.videoRecorder.state!=='inactive');
+  const hasAudioRecorder=!!(mediaRecordState.audioRecorder && mediaRecordState.audioRecorder.state!=='inactive');
+  mediaRecordState.discardVideoOnStop=hasVideoRecorder;
+  mediaRecordState.discardAudioOnStop=hasAudioRecorder;
+  await stopVideoRecording();
+  await stopAudioRecording();
+  recordVideoChk.checked=false;
+  recordAudioChk.checked=false;
+  if(mediaRecordState.videoUrl){ URL.revokeObjectURL(mediaRecordState.videoUrl); mediaRecordState.videoUrl=null; }
+  if(mediaRecordState.audioUrl){ URL.revokeObjectURL(mediaRecordState.audioUrl); mediaRecordState.audioUrl=null; }
+  mediaRecordState.videoChunks=[];
+  mediaRecordState.audioChunks=[];
+  mediaRecordState.videoBlob=null;
+  mediaRecordState.audioBlob=null;
+  if(!hasVideoRecorder) mediaRecordState.discardVideoOnStop=false;
+  if(!hasAudioRecorder) mediaRecordState.discardAudioOnStop=false;
+  mediaRecordState.startPerf=0;
+  mediaRecordState.pausedAccumMs=0;
+  mediaRecordState.pauseStartedPerf=0;
+  mediaRecordState.videoStartPerf=0;
+  mediaRecordState.audioStartPerf=0;
+  updateRecordBadges();
+}
 function timeAtChartEvent(e){
   const r=chartState.render; if(!r) return null;
   const rect=chart.getBoundingClientRect();
@@ -1035,11 +1186,21 @@ function timeAtChartEvent(e){
 }
 async function showRecordedFrameAt(t){
   if(!series.length) return;
+  const p=series.reduce((best,s)=> Math.abs(s.t-t)<Math.abs((best?.t??0)-t)?s:best, series[0]);
   if(!mediaRecordState.videoBlob){
-    status.textContent='録画ファイルがまだ確定していません。カメラ録画を停止してからグラフをクリックしてください。';
+    const snap=nearestSnapshot(p?.t ?? t);
+    if(snap){
+      const img=new Image();
+      await new Promise(resolve=>{ img.onload=resolve; img.onerror=resolve; img.src=snap.data; });
+      vctx.drawImage(img,0,0,view.width,view.height);
+      reviewingFrame=true;
+      const snapTime = typeof snap.mediaTime==='number' ? `${snap.mediaTime.toFixed(2)}秒` : '時刻未対応';
+      status.textContent=`記録中スナップショット表示: ${snapTime}`;
+      return;
+    }
+    status.textContent='録画ファイルがまだ確定していません。カメラ録画を停止するか、記録中スナップショットがある点をクリックしてください。';
     return;
   }
-  const p=series.reduce((best,s)=> Math.abs(s.t-t)<Math.abs((best?.t??0)-t)?s:best, series[0]);
   const mediaTime = p && typeof p.mediaTime==='number' ? p.mediaTime : (t-(series[0]?.t||t));
   if(!isFinite(mediaTime) || mediaTime===''){
     status.textContent='この時刻には録画との対応情報がありません。録画中に記録された点をクリックしてください。';
@@ -1759,6 +1920,7 @@ startBtn.onclick = async ()=>{
     status.textContent='';
 
     requestAnimationFrame(drawLoop);
+    await resumeOrStartMediaRecorders();
     if(inferTimer) clearInterval(inferTimer);
     inferTimer = setInterval(async ()=>{
       if(paused || inferBusy) return;
@@ -1782,21 +1944,27 @@ startBtn.onclick = async ()=>{
     if(e && (e.name==='NotAllowedError' || e.name==='SecurityError')) alert(message);
   }
 };
-pauseBtn.onclick = ()=>{
+pauseBtn.onclick = async ()=>{
   if(!running) return;
   paused=!paused;
   pauseBtn.textContent = paused ? '▶ 再開' : '⏸ 一時停止';
   if(paused){
-    chartState.viewEnd = series.length ? series[series.length-1].t : performance.now()/1000;
+    pauseMediaRecorders();
+    chartState.viewEnd = null;
     status.textContent='一時停止中：グラフをドラッグ/ホイールで過去へ移動、クリックで録画フレームを表示できます。';
     drawNiceChart();
   }else{
     reviewingFrame=false;
     chartState.viewEnd=null;
+    await resumeOrStartMediaRecorders();
     doInferenceOnce(); drawNiceChart();
   }
 };
-resetBtn.onclick = ()=> resetData();
+resetBtn.onclick = async ()=>{
+  await resetRecordings();
+  resetData();
+  status.textContent='録画・録音・グラフデータをリセットしました。チェックを入れ直すと次の開始/再開に連動します。';
+};
 dlBtn.onclick = ()=>{
   if(!records.length){ alert('記録がありません'); return; }
   let csv='time,media_time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db\n';

@@ -100,7 +100,7 @@
 </style>
 
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
 <!-- ライブラリ読込後、セッション作成前に設定する -->
 <script>
   ort.env.wasm.numThreads = 1;
@@ -361,7 +361,8 @@ const emotionState = {
   lastTs: 0
 };
 const faceMetricsState = {
-  mesh:null, ready:false, busy:false, last:null, lastTs:0, error:null
+  mesh:null, ready:false, busy:false, last:null, lastTs:0, error:null,
+  pending:null, timeoutCount:0, disabled:false, nextTryTs:0
 };
 const audioState = {
   ctx:null, analyser:null, data:null, stream:null, last:null,
@@ -1268,6 +1269,7 @@ function faceDirectionFromLandmarks(lm){
   };
 }
 async function ensureFaceMesh(){
+  if(faceMetricsState.disabled) return null;
   if(faceMetricsState.mesh) return faceMetricsState.mesh;
   if(faceMetricsState.error) return null;
   if(typeof FaceMesh==='undefined'){
@@ -1275,32 +1277,68 @@ async function ensureFaceMesh(){
     status.textContent='顔向き解析ライブラリを読み込めません';
     return null;
   }
-  const mesh=new FaceMesh({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+  // バージョン固定URLを使う。これをしないと face_mesh.js と wasm/model 側の
+  // 参照先がずれて、Console に dependency: fp/cp の警告が出たまま止まることがある。
+  const mpBase='https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/';
+  const mesh=new FaceMesh({locateFile:(file)=>`${mpBase}${file}`});
   mesh.setOptions({maxNumFaces:1,refineLandmarks:true,minDetectionConfidence:0.55,minTrackingConfidence:0.55});
   mesh.onResults((res)=>{
     const lm=res.multiFaceLandmarks && res.multiFaceLandmarks[0];
     const metrics=lm ? faceDirectionFromLandmarks(lm) : null;
-    if(metrics){ faceMetricsState.last=metrics; faceMetricsState.lastTs=performance.now(); }
+    if(metrics){
+      faceMetricsState.last=metrics;
+      faceMetricsState.lastTs=performance.now();
+      faceMetricsState.timeoutCount=0;
+      faceMetricsState.ready=true;
+    }
     faceMetricsState.busy=false;
+    faceMetricsState.pending=null;
   });
   faceMetricsState.mesh=mesh;
   return mesh;
+}
+function timeoutPromise(ms){
+  return new Promise((_,reject)=>setTimeout(()=>reject(new Error(`timeout ${ms}ms`)),ms));
 }
 async function analyzeFaceMetrics(){
   if(!(plotHeadChk.checked || plotMouthChk.checked)) return null;
   const now=performance.now();
   if(faceMetricsState.last && now-faceMetricsState.lastTs<220) return faceMetricsState.last;
+  if(faceMetricsState.disabled || now < faceMetricsState.nextTryTs) return faceMetricsState.last;
   if(faceMetricsState.busy) return faceMetricsState.last;
   const mesh=await ensureFaceMesh();
   if(!mesh) return faceMetricsState.last;
-  try{
-    faceMetricsState.busy=true;
-    await mesh.send({image:vid});
-  }catch(e){
+
+  // 重要：MediaPipe FaceMesh の wasm/model 読み込みが詰まると mesh.send() が
+  // resolve せず、await している推論ループ全体が止まる。そこで FaceMesh は
+  // バックグラウンドで投げ、YOLO/表情推論のループは止めない。
+  faceMetricsState.busy=true;
+  const started=performance.now();
+  faceMetricsState.pending = Promise.race([
+    mesh.send({image:vid}),
+    timeoutPromise(1200)
+  ]).catch(e=>{
     faceMetricsState.busy=false;
-    faceMetricsState.error=e;
-    console.warn('FaceMesh解析に失敗しました',e);
-  }
+    faceMetricsState.pending=null;
+    faceMetricsState.timeoutCount++;
+    console.warn('FaceMesh解析をスキップしました', e);
+    if(faceMetricsState.timeoutCount>=3){
+      faceMetricsState.nextTryTs=performance.now()+5000;
+      status.textContent='顔向き/口解析の読み込みが遅いため一時スキップ中です。YOLOと表情推論は継続します。';
+    }
+    if(faceMetricsState.timeoutCount>=8){
+      faceMetricsState.disabled=true;
+      plotHeadChk.checked=false;
+      plotMouthChk.checked=false;
+      status.textContent='MediaPipe FaceMesh を読み込めないため、顔向き/口の開き解析をOFFにしました。';
+    }
+  }).finally(()=>{
+    // onResults が先に呼ばれていない場合の保険。正常時は onResults 側でも解除される。
+    if(performance.now()-started>1000){
+      faceMetricsState.busy=false;
+      faceMetricsState.pending=null;
+    }
+  });
   return faceMetricsState.last;
 }
 async function ensureAudio(){

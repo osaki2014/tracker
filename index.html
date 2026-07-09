@@ -47,6 +47,19 @@
   .recInfo.active{background:#e9fff5;color:#24745f;border-color:#a8decf}
   .recInfo.paused{background:#fff7d9;color:#8a6500;border-color:#edd37d}
   .recInfo.saved{background:#eef5ff;color:#35618e;border-color:#c8d9f5}
+  .toolbarGroup{display:flex;align-items:center;gap:8px;padding:4px;border-radius:999px;background:rgba(255,255,255,.46);border:1px solid rgba(232,216,190,.55)}
+  .toolbarGroup.record{background:rgba(233,255,245,.55);border-color:#bfe4d9}
+  .toolbarGroup.manage{background:rgba(255,248,238,.75);border-color:#eadfce}
+  .toolbarGroup.save{background:rgba(238,245,255,.72);border-color:#c8d9f5}
+  .helpBtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-left:4px;border-radius:999px;border:1px solid var(--pill-b);background:#fff;color:#4f7f73;font-size:12px;font-weight:800;cursor:pointer}
+  #helpOverlay{position:fixed;inset:0;background:rgba(30,42,38,.28);z-index:80;display:none;align-items:center;justify-content:center;padding:20px}
+  #helpOverlay.open{display:flex}
+  #helpCard{width:min(560px,calc(100vw - 32px));max-height:80vh;overflow:auto;background:#fffdf8;border:1px solid var(--line);border-radius:24px;box-shadow:0 24px 80px rgba(0,0,0,.22);padding:20px}
+  #helpCard h2{margin:0 0 8px;font-size:20px;color:#48645e}
+  #helpCard p{margin:8px 0}
+  #helpCard ul{padding-left:22px}
+  #helpClose{float:right;padding:6px 10px}
+  .chartHint{width:calc(100vw - 24px);margin:0 auto 6px;color:#64756f;font-size:13px;padding:0 10px}
   /* レイアウト */
   #wrap{width:min(1220px,100%);margin:14px auto 8px;padding:0 12px;display:block}
   #stage{position:relative;border-radius:26px}
@@ -97,22 +110,28 @@
 </script>
 
 <header>
-  <div class="appTitle">memo <span class="ver">v2026.07.09.6</span></div>
-  <button id="start">▶ カメラ開始</button>
-  <button id="stop" disabled>■ 停止</button>
-  <button id="pause" disabled>⏸ 一時停止</button>
-  <button id="reset" disabled>🧹 データリセット</button>
-  <button id="download" disabled>⬇ CSV保存</button>
-  <button id="saveVideo" disabled>🎥 録画保存</button>
-  <button id="saveAudio" disabled>🎙 録音保存</button>
-  <button id="loadCsvBtn">📄 CSV読込</button>
-  <button id="loadVideoBtn">🎞 録画読込</button>
-  <button id="loadAudioBtn">🔊 音声読込</button>
+  <div class="appTitle">memo <span class="ver">v2026.07.09.7</span></div>
+  <span class="toolbarGroup record">
+    <button id="start">▶ カメラ起動</button>
+    <button id="stop" hidden disabled>■ 停止</button>
+    <button id="pause" disabled>● 記録開始</button>
+  </span>
+  <span class="toolbarGroup manage">
+    <button id="reset" disabled>🧹 データリセット</button>
+  </span>
+  <span class="toolbarGroup save">
+    <button id="download" disabled>⬇ CSV保存</button>
+    <button id="saveVideo" disabled>🎥 録画保存</button>
+    <button id="saveAudio" disabled>🎙 録音保存</button>
+    <button id="loadCsvBtn">📄 CSV読込</button>
+    <button id="loadVideoBtn">🎞 録画読込</button>
+    <button id="loadAudioBtn">🔊 音声読込</button>
+  </span>
   <input id="loadCsv" type="file" accept=".csv,text/csv" hidden>
   <input id="loadVideo" type="file" accept="video/*,.webm" hidden>
   <input id="loadAudio" type="file" accept="audio/*,.webm" hidden>
 
-  <label>モード:
+  <label>モード:<button type="button" class="helpBtn" data-help="mode" aria-label="モードの説明">?</button>
     <select id="mode" disabled>
       <option value="coco11">物体・人物全体（YOLO11, COCO80）</option>
       <option value="coco26">物体・人物全体（YOLO26n, COCO80）</option>
@@ -133,17 +152,17 @@
     </label>
 
   <label><input type="checkbox" id="rec" disabled> この対象だけ記録</label>
-  <label>表情:
+  <label>表情:<button type="button" class="helpBtn" data-help="emotion" aria-label="表情分析の説明">?</button>
     <select id="emoMethod" disabled>
       <option value="poster">POSTER V2 / POSTER++</option>
       <option value="emotiefflib" selected>EmotiEffLib</option>
       <option value="off">OFF</option>
     </select>
   </label>
-  <label><input type="checkbox" id="plotHead" disabled checked> 顔向き</label>
-  <label><input type="checkbox" id="plotMouth" disabled checked> 口の開き</label>
-  <label><input type="checkbox" id="plotSpeech" disabled> 発話ON/OFF</label>
-  <label><input type="checkbox" id="plotVolume" disabled> 音量</label>
+  <label><input type="checkbox" id="plotHead" disabled checked> 顔向き<button type="button" class="helpBtn" data-help="head" aria-label="顔向きの説明">?</button></label>
+  <label><input type="checkbox" id="plotMouth" disabled checked> 口の開き<button type="button" class="helpBtn" data-help="mouth" aria-label="口の開きの説明">?</button></label>
+  <label><input type="checkbox" id="plotSpeech" disabled> 発話ON/OFF<button type="button" class="helpBtn" data-help="speech" aria-label="発話判定の説明">?</button></label>
+  <label><input type="checkbox" id="plotVolume" disabled> 音量<button type="button" class="helpBtn" data-help="audio" aria-label="音量の説明">?</button></label>
   <label><input type="checkbox" id="recordVideo" disabled> カメラ録画 <span id="videoRecInfo" class="recInfo">未記録</span></label>
   <label><input type="checkbox" id="recordAudio" disabled> 音声録音 <span id="audioRecInfo" class="recInfo">未記録</span></label>
 
@@ -243,7 +262,15 @@
 </div>
 
 <canvas id="chart" height="280"></canvas>
+<div class="chartHint">グラフ操作：ホイール/トラックボールで表示時間を拡大・縮小、ドラッグで過去へ移動、ダブルクリックで現在へ戻って自動スクロール。記録中に過去へ移動しても、裏では記録を続けます。</div>
 <div id="status"></div>
+<div id="helpOverlay" role="dialog" aria-modal="true">
+  <div id="helpCard">
+    <button id="helpClose" type="button">閉じる</button>
+    <h2 id="helpTitle"></h2>
+    <div id="helpBody"></div>
+  </div>
+</div>
 
 <script>
 /* ===== モデル/閾値 ===== */
@@ -295,6 +322,10 @@ const boxInfo= document.getElementById('boxInfo');
 const chart  = document.getElementById('chart');
 const cctx   = chart.getContext('2d');
 const status = document.getElementById('status');
+const helpOverlay = document.getElementById('helpOverlay');
+const helpTitle = document.getElementById('helpTitle');
+const helpBody = document.getElementById('helpBody');
+const helpClose = document.getElementById('helpClose');
 const detectedBar = document.getElementById('detectedBar');
 const tplToggle = document.getElementById('tplToggle');
 const sidePanel = document.getElementById('side');
@@ -349,7 +380,7 @@ const mediaRecordState = {
   replayVideo:null,
   frameSnapshots:[], lastSnapshotTs:0
 };
-const chartState = { viewEnd:null, windowSec:10, drag:false, dragX:0, dragEnd:0, moved:false, render:null };
+const chartState = { viewEnd:null, windowSec:10, minWindowSec:1, maxWindowSec:600, drag:false, dragX:0, dragEnd:0, moved:false, render:null };
 const playState = {
   chartStart:null,
   duration:1.0,
@@ -412,6 +443,63 @@ tplToggle.addEventListener('click', ()=>{
 
 const tplSizeEl= document.getElementById('tplSize');
 const tplScoreEl=document.getElementById('tplScore');
+
+const HELP_TEXT = {
+  mode: {
+    title:'モードの手法',
+    body:`<p><b>何を探すかを選ぶ場所</b>です。YOLOは写真の中から「顔」「人」「物」を四角で見つけるAIです。テンプレートは、先生が選んだ小さな絵柄を次のフレームから探し続ける方法です。</p>
+    <ul>
+      <li>YOLO: たくさんの写真で学習した検出AI。速くて実用的です。</li>
+      <li>FaceDetector/FaceMesh: 顔の点を見つけ、顔向きや口の形を見ます。</li>
+      <li>テンプレート追跡: 選んだ見た目と似ている場所を探します。</li>
+    </ul>
+    <p>参考: <a href="https://arxiv.org/abs/1506.02640" target="_blank" rel="noreferrer">YOLO</a> / <a href="https://arxiv.org/abs/1906.08172" target="_blank" rel="noreferrer">MediaPipe</a> / <a href="https://github.com/google-ai-edge/mediapipe" target="_blank" rel="noreferrer">MediaPipe GitHub</a></p>`
+  },
+  emotion: {
+    title:'表情分析',
+    body:`<p><b>顔の写真から気持ちの種類を予想する方法</b>です。まずYOLOで顔を見つけ、その顔だけを切り出して、怒り・喜び・驚きなどのどれに近いかをAIが点数で比べます。</p>
+    <ul>
+      <li>POSTER / POSTER++: 顔のいろいろな場所を見比べるTransformer系の方法です。</li>
+      <li>EmotiEffLib: 軽く動く表情認識モデルを使うためのライブラリです。</li>
+    </ul>
+    <p>参考: <a href="https://arxiv.org/abs/2204.04083" target="_blank" rel="noreferrer">POSTER</a> / <a href="https://arxiv.org/abs/2301.12149" target="_blank" rel="noreferrer">POSTER++</a> / <a href="https://github.com/sb-ai-lab/EmotiEffLib" target="_blank" rel="noreferrer">EmotiEffLib GitHub</a></p>`
+  },
+  head: {
+    title:'顔向き',
+    body:`<p><b>顔の上・下・右・左を見ます。</b>顔の上に小さな点をたくさん置き、鼻・目・あごの位置関係から、顔がどちらを向いているかを計算します。</p>
+    <p>たとえば、鼻が目の中心より右にずれていれば「右向き」っぽい、と考えます。</p>
+    <p>参考: <a href="https://arxiv.org/abs/1906.08172" target="_blank" rel="noreferrer">MediaPipe</a> / <a href="https://github.com/google-ai-edge/mediapipe" target="_blank" rel="noreferrer">Face Mesh実装</a></p>`
+  },
+  mouth: {
+    title:'口の開き',
+    body:`<p><b>上くちびると下くちびるの距離</b>を見ます。口の横幅に比べて、上下の距離が大きければ「口が開いている」と判断します。</p>
+    <p>この考え方は、目のまばたきで使われる比率の考え方に近く、顔の大きさが変わっても比べやすいのが利点です。</p>
+    <p>参考: <a href="https://vision.fe.uni-lj.si/cvww2016/proceedings/papers/05.pdf" target="_blank" rel="noreferrer">Eye Aspect Ratioの考え方</a> / <a href="https://arxiv.org/abs/1906.08172" target="_blank" rel="noreferrer">MediaPipe</a></p>`
+  },
+  speech: {
+    title:'発話ON/OFF',
+    body:`<p><b>マイクの音が、まわりの静かな音よりどれくらい大きいか</b>を見ます。音の大きさが急に上がり、少し続いたら「話している」とします。</p>
+    <p>このアプリでは軽く動くように、音声認識ではなくVAD（声があるかを判定する方法）に近い考え方でON/OFFを出しています。</p>
+    <p>参考: <a href="https://github.com/wiseman/py-webrtcvad" target="_blank" rel="noreferrer">WebRTC VAD実装例</a> / <a href="https://arxiv.org/abs/1903.02844" target="_blank" rel="noreferrer">robust VAD study</a></p>`
+  },
+  audio: {
+    title:'音量',
+    body:`<p><b>音の波の大きさをdBで表します。</b>小さい音はマイナスの大きな数字、声や物音が大きいと数字が上がります。</p>
+    <p>発話判定では、この音量と、今の部屋の静けさ（ノイズ床）を比べています。</p>
+    <p>参考: <a href="https://webrtc.org/" target="_blank" rel="noreferrer">WebRTC</a> / <a href="https://developer.mozilla.org/docs/Web/API/AnalyserNode" target="_blank" rel="noreferrer">Web Audio AnalyserNode</a></p>`
+  }
+};
+function openHelp(key){
+  const h=HELP_TEXT[key]; if(!h) return;
+  helpTitle.textContent=h.title;
+  helpBody.innerHTML=h.body;
+  helpOverlay.classList.add('open');
+}
+document.querySelectorAll('.helpBtn').forEach(btn=>btn.addEventListener('click', e=>{
+  e.preventDefault(); e.stopPropagation(); openHelp(btn.dataset.help);
+}));
+helpClose.addEventListener('click', ()=>helpOverlay.classList.remove('open'));
+helpOverlay.addEventListener('click', e=>{ if(e.target===helpOverlay) helpOverlay.classList.remove('open'); });
 
 /* ===== 状態 ===== */
 let W=640, H=360;
@@ -518,9 +606,10 @@ async function stopApp(){
   if(chartTimer){ clearInterval(chartTimer); chartTimer=null; }
   stopCamera();
   startBtn.disabled=false;
+  startBtn.textContent='▶ カメラ起動';
   stopBtn.disabled=true;
   pauseBtn.disabled=true;
-  pauseBtn.textContent='⏸ 一時停止';
+  pauseBtn.textContent='● 記録開始';
   chartState.viewEnd=null;
   reviewingFrame=true;
   drawNiceChart();
@@ -613,18 +702,29 @@ recordAudioChk.addEventListener('change', async ()=>{
   updateRecordBadges();
 });
 chart.addEventListener('wheel', e=>{
-  if(!paused || !series.length) return;
+  if(!series.length) return;
   e.preventDefault();
   const dataStart=series[0].t, dataEnd=series[series.length-1].t;
-  const span=chartState.windowSec || 10;
-  const minEnd=Math.min(dataEnd,dataStart+span);
-  chartState.viewEnd = chartState.viewEnd ?? dataEnd;
-  chartState.viewEnd += Math.sign(e.deltaY)*1.0;
-  chartState.viewEnd = Math.max(minEnd, Math.min(dataEnd, chartState.viewEnd));
+  const r=chartState.render;
+  const rect=chart.getBoundingClientRect();
+  const x=(e.clientX-rect.left)*(chart.width/rect.width);
+  const oldSpan=chartState.windowSec || 10;
+  const oldEnd=chartState.viewEnd ?? dataEnd;
+  const oldStart=oldEnd-oldSpan;
+  const anchorRatio=r ? Math.max(0,Math.min(1,(x-r.L)/(r.w-r.L-r.R))) : 0.5;
+  const anchorTime=oldStart + oldSpan*anchorRatio;
+  const factor=Math.exp(Math.sign(e.deltaY)*0.18);
+  const newSpan=Math.max(chartState.minWindowSec,Math.min(chartState.maxWindowSec,oldSpan*factor));
+  let newStart=anchorTime-newSpan*anchorRatio;
+  let newEnd=newStart+newSpan;
+  if(newStart<dataStart){ newStart=dataStart; newEnd=newStart+newSpan; }
+  if(newEnd>dataEnd){ newEnd=dataEnd; newStart=newEnd-newSpan; }
+  chartState.windowSec=newSpan;
+  chartState.viewEnd=Math.max(dataStart+newSpan,Math.min(dataEnd,newEnd));
   drawNiceChart();
 },{passive:false});
 chart.addEventListener('pointerdown', e=>{
-  if(!paused || !series.length) return;
+  if(!series.length) return;
   const handle=chartHandleAtEvent(e);
   if(handle){
     playState.dragHandle=handle;
@@ -660,6 +760,12 @@ window.addEventListener('pointermove', e=>{
   chartState.viewEnd = Math.max(minEnd, Math.min(dataEnd, chartState.dragEnd - (e.clientX-chartState.dragX)*secPerPx));
   drawNiceChart();
 });
+chart.addEventListener('dblclick', e=>{
+  if(!series.length) return;
+  chartState.viewEnd=null;
+  drawNiceChart();
+  status.textContent='グラフ表示を現在に戻し、自動スクロールを再開しました。';
+});
 window.addEventListener('pointerup', async e=>{
   const handle=playState.dragHandle;
   const moved=chartState.moved;
@@ -677,7 +783,6 @@ window.addEventListener('pointerup', async e=>{
   }
 });
 chart.addEventListener('click', async e=>{
-  if(!paused) return;
   if(playState.suppressClick) return;
   const t=timeAtChartEvent(e);
   if(t!=null) await playSelectionAtChartTime(t, playState.duration || 1.0);
@@ -891,14 +996,13 @@ function drawNiceChart(){
   const dataEnd = series.length ? series[series.length-1].t : performance.now()/1000;
   const liveNow = performance.now()/1000;
   let tMin, tMax;
-  if(series.length>=2 && chartState.viewEnd==null){
+  const span = chartState.windowSec || DEFAULT_SEC;
+  const now = series.length ? (chartState.viewEnd ?? dataEnd) : liveNow;
+  tMax = now;
+  tMin = now - span;
+  if(series.length && tMin<series[0].t && chartState.viewEnd!=null){
     tMin=series[0].t;
-    tMax=Math.max(series[series.length-1].t, tMin+1);
-  }else{
-    const now = paused && series.length ? (chartState.viewEnd ?? dataEnd) : liveNow;
-    const span = chartState.windowSec || DEFAULT_SEC;
-    tMin = now - span;
-    tMax = now;
+    tMax=Math.max(tMin+span,Math.min(dataEnd,tMin+span));
   }
   chartState.render={L,R,T,B,w,h,tMin,tMax};
 
@@ -2190,12 +2294,16 @@ function desiredInferInterval(){
 
 /* ===== 起動/操作 ===== */
 startBtn.onclick = async ()=>{
+  if(running || camStream){
+    await stopApp();
+    return;
+  }
   try{
     startBtn.disabled=true;
     status.textContent='カメラの許可を確認しています…';
     await openCamera();
     running=true; paused=false;
-    startBtn.disabled=true; stopBtn.disabled=false; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
+    startBtn.disabled=false; startBtn.textContent='■ カメラ停止'; stopBtn.disabled=true; pauseBtn.disabled=false; pauseBtn.textContent='■ 記録停止'; resetBtn.disabled=false; dlBtn.disabled=false;
     saveVideoBtn.disabled=!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length);
     saveAudioBtn.disabled=!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length);
     modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false; emoMethodSel.disabled=false;
@@ -2232,6 +2340,7 @@ startBtn.onclick = async ()=>{
     stopCamera();
     running=false;
     startBtn.disabled=false;
+    startBtn.textContent='▶ カメラ起動';
     stopBtn.disabled=true;
     const message=cameraErrorMessage(e);
     status.textContent=message;
@@ -2245,11 +2354,11 @@ stopBtn.onclick = async ()=>{
 pauseBtn.onclick = async ()=>{
   if(!running) return;
   paused=!paused;
-  pauseBtn.textContent = paused ? '▶ 再開' : '⏸ 一時停止';
+  pauseBtn.textContent = paused ? '● 記録開始' : '■ 記録停止';
   if(paused){
     await pauseMediaRecorders();
     chartState.viewEnd = null;
-    status.textContent='一時停止中：グラフをドラッグ/ホイールで過去へ移動、クリックで録画フレームを表示できます。';
+    status.textContent='記録停止中：グラフをドラッグ/ホイールで過去へ移動、クリックで録画フレームを表示できます。';
     drawNiceChart();
   }else{
     reviewingFrame=false;
@@ -2347,7 +2456,7 @@ loadCsvInput.addEventListener('change', async e=>{
       series.push({t:r.t,x:r.x,y:r.y,datetime:r.datetime,date:r.date,clock:r.clock,mediaTime:r.mediaTime,emotion:r.emotion,emotionScore:r.emotionScore,emotionMethod:r.emotionMethod,yaw:r.yaw,pitch:r.pitch,headHorizontal:r.headHorizontal,headVertical:r.headVertical,mouthOpen:r.mouthOpen,mouthRatio:r.mouthRatio,speech:r.speech,volumeDb:r.volumeDb});
     }
   }
-  paused=true; pauseBtn.disabled=false; pauseBtn.textContent='▶ 再開'; dlBtn.disabled=false; resetBtn.disabled=false;
+  paused=true; pauseBtn.disabled=false; pauseBtn.textContent='● 記録開始'; dlBtn.disabled=false; resetBtn.disabled=false;
   chartState.viewEnd=null; reviewingFrame=true; drawNiceChart();
   status.textContent=`CSVを読み込みました（${series.length}点）。録画/録音も読み込むと、グラフクリックで約3秒再生できます。`;
   e.target.value='';

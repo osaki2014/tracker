@@ -97,8 +97,9 @@
 </script>
 
 <header>
-  <div class="appTitle">memo <span class="ver">v2026.07.09.5</span></div>
+  <div class="appTitle">memo <span class="ver">v2026.07.09.6</span></div>
   <button id="start">▶ カメラ開始</button>
+  <button id="stop" disabled>■ 停止</button>
   <button id="pause" disabled>⏸ 一時停止</button>
   <button id="reset" disabled>🧹 データリセット</button>
   <button id="download" disabled>⬇ CSV保存</button>
@@ -261,6 +262,7 @@ const view = document.getElementById('view');
 const vctx = view.getContext('2d', { willReadFrequently:true });
 
 const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
 const pauseBtn = document.getElementById('pause');
 const resetBtn = document.getElementById('reset');
 const dlBtn    = document.getElementById('download');
@@ -347,7 +349,18 @@ const mediaRecordState = {
   replayVideo:null,
   frameSnapshots:[], lastSnapshotTs:0
 };
-const chartState = { viewEnd:null, windowSec:10, drag:false, dragX:0, dragEnd:0, render:null };
+const chartState = { viewEnd:null, windowSec:10, drag:false, dragX:0, dragEnd:0, moved:false, render:null };
+const playState = {
+  chartStart:null,
+  duration:1.0,
+  progress:null,
+  dragHandle:null,
+  dragBaseStart:0,
+  dragBaseEnd:0,
+  suppressClick:false,
+  timer:null,
+  currentAudio:null
+};
 let reviewingFrame=false;
 /* ▼▼ スライダ値（いつでも変更可能） */
 const P = {
@@ -496,6 +509,23 @@ function stopCamera(){
     }
   }catch(e){ console.warn('stopCamera warn:', e); }
 }
+async function stopApp(){
+  paused=true;
+  running=false;
+  await pauseMediaRecorders();
+  stopPlaybackTimer();
+  if(inferTimer){ clearInterval(inferTimer); inferTimer=null; }
+  if(chartTimer){ clearInterval(chartTimer); chartTimer=null; }
+  stopCamera();
+  startBtn.disabled=false;
+  stopBtn.disabled=true;
+  pauseBtn.disabled=true;
+  pauseBtn.textContent='⏸ 一時停止';
+  chartState.viewEnd=null;
+  reviewingFrame=true;
+  drawNiceChart();
+  status.textContent='カメラを停止しました。記録済みデータは保持しています。';
+}
 async function restartCamera(){
   stopCamera();
   try{ await openCamera(); }
@@ -595,24 +625,62 @@ chart.addEventListener('wheel', e=>{
 },{passive:false});
 chart.addEventListener('pointerdown', e=>{
   if(!paused || !series.length) return;
+  const handle=chartHandleAtEvent(e);
+  if(handle){
+    playState.dragHandle=handle;
+    playState.dragBaseStart=playState.chartStart;
+    playState.dragBaseEnd=playState.chartStart + playState.duration;
+    playState.suppressClick=true;
+    return;
+  }
   chartState.viewEnd = chartState.viewEnd ?? series[series.length-1].t;
-  chartState.drag=true; chartState.dragX=e.clientX; chartState.dragEnd=chartState.viewEnd;
+  chartState.drag=true; chartState.moved=false; chartState.dragX=e.clientX; chartState.dragEnd=chartState.viewEnd;
 });
 window.addEventListener('pointermove', e=>{
+  if(playState.dragHandle){
+    const t=timeAtChartEvent(e);
+    if(t==null) return;
+    if(playState.dragHandle==='start'){
+      const end=playState.dragBaseEnd;
+      playState.chartStart=Math.min(t,end-0.2);
+      playState.duration=Math.max(0.2,end-playState.chartStart);
+    }else{
+      playState.duration=Math.max(0.2,t-playState.chartStart);
+    }
+    drawNiceChart();
+    return;
+  }
   if(!chartState.drag) return;
   const r=chartState.render; if(!r) return;
   const secPerPx=(r.tMax-r.tMin)/(r.w-r.L-r.R);
   const dataStart=series[0].t, dataEnd=series[series.length-1].t;
   const span=chartState.windowSec || 10;
   const minEnd=Math.min(dataEnd,dataStart+span);
+  if(Math.abs(e.clientX-chartState.dragX)>3) chartState.moved=true;
   chartState.viewEnd = Math.max(minEnd, Math.min(dataEnd, chartState.dragEnd - (e.clientX-chartState.dragX)*secPerPx));
   drawNiceChart();
 });
-window.addEventListener('pointerup', e=>{ chartState.drag=false; });
+window.addEventListener('pointerup', async e=>{
+  const handle=playState.dragHandle;
+  const moved=chartState.moved;
+  chartState.drag=false;
+  chartState.moved=false;
+  playState.dragHandle=null;
+  if(handle && playState.chartStart!=null){
+    await playSelectionAtChartTime(playState.chartStart, playState.duration);
+    setTimeout(()=>{ playState.suppressClick=false; }, 80);
+  }else if(moved){
+    playState.suppressClick=true;
+    setTimeout(()=>{ playState.suppressClick=false; }, 120);
+  }else{
+    setTimeout(()=>{ playState.suppressClick=false; }, 0);
+  }
+});
 chart.addEventListener('click', async e=>{
   if(!paused) return;
+  if(playState.suppressClick) return;
   const t=timeAtChartEvent(e);
-  if(t!=null) await showRecordedFrameAt(t);
+  if(t!=null) await playSelectionAtChartTime(t, playState.duration || 1.0);
 });
 
 /* ===== FPS（映像） ===== */
@@ -628,12 +696,37 @@ function meterVideo(){
 }
 
 /* ===== グラフ ===== */
+function dateFieldsFromT(t){
+  const d=new Date(performance.timeOrigin + t*1000);
+  const pad=(n,w=2)=>String(n).padStart(w,'0');
+  return {
+    datetime:`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}`,
+    date:`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`,
+    clock:`${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}`
+  };
+}
+function absoluteMsFromT(t){
+  const anchor=series.find(p=>p.datetime && !Number.isNaN(Date.parse(p.datetime.replace(' ','T'))));
+  if(anchor){
+    return Date.parse(anchor.datetime.replace(' ','T')) + (t-anchor.t)*1000;
+  }
+  return performance.timeOrigin + t*1000;
+}
+function formatAxisTime(t){
+  const d=new Date(absoluteMsFromT(t));
+  const pad=n=>String(n).padStart(2,'0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 function pushData(x,y,emotion=null,faceMetrics=null,audioMetrics=null){
   const t=(performance.now()/1000).toFixed(2);
   const tNum=+t;
   const mediaTime = currentMediaTime();
+  const dt=dateFieldsFromT(tNum);
   series.push({
     t:tNum,x,y,
+    datetime:dt.datetime,
+    date:dt.date,
+    clock:dt.clock,
     mediaTime,
     emotion: emotion?.label || '',
     emotionScore: emotion?.score || '',
@@ -651,6 +744,8 @@ function pushData(x,y,emotion=null,faceMetrics=null,audioMetrics=null){
 }
 function resetData(){
   series=[]; records=[]; mediaRecordState.frameSnapshots=[]; mediaRecordState.lastSnapshotTs=0;
+  stopPlaybackTimer();
+  playState.chartStart=null; playState.progress=null; playState.duration=1.0; playState.dragHandle=null;
   chartState.viewEnd=null; chartState.windowSec=10; reviewingFrame=false;
   status.textContent='データリセット済み：新しい記録を開始できます。録画/録音ファイルは保存済みであれば保持されています。';
   drawNiceChart();
@@ -738,6 +833,54 @@ function seriesForVisibleRange(data,tMin,tMax){
   const end=Math.min(data.length,last+1);
   return data.slice(start,end);
 }
+function chartXForTime(t,r=chartState.render){
+  if(!r) return null;
+  return r.L+(r.w-r.L-r.R)*(t-r.tMin)/(r.tMax-r.tMin);
+}
+function chartHandleAtEvent(e){
+  const r=chartState.render;
+  if(!r || playState.chartStart==null) return null;
+  const rect=chart.getBoundingClientRect();
+  const x=(e.clientX-rect.left)*(chart.width/rect.width);
+  const y=(e.clientY-rect.top)*(chart.height/rect.height);
+  if(y<r.T || y>r.h-r.B) return null;
+  const sx=chartXForTime(playState.chartStart,r);
+  const ex=chartXForTime(playState.chartStart+playState.duration,r);
+  const tol=10;
+  if(Math.abs(x-sx)<=tol) return 'start';
+  if(Math.abs(x-ex)<=tol) return 'end';
+  return null;
+}
+function drawPlaybackWindow(){
+  const r=chartState.render;
+  if(!r || playState.chartStart==null) return;
+  const start=playState.chartStart;
+  const end=start+(playState.duration||1);
+  if(end<r.tMin || start>r.tMax) return;
+  const x1=Math.max(r.L,Math.min(r.w-r.R,chartXForTime(start,r)));
+  const x2=Math.max(r.L,Math.min(r.w-r.R,chartXForTime(end,r)));
+  const y=r.T, h=r.h-r.T-r.B;
+  cctx.save();
+  cctx.beginPath(); cctx.rect(r.L,r.T,r.w-r.L-r.R,h); cctx.clip();
+  cctx.fillStyle='rgba(116,183,167,.10)';
+  cctx.fillRect(x1,y,Math.max(1,x2-x1),h);
+  if(playState.progress!=null){
+    const px=Math.max(x1,Math.min(x2,chartXForTime(playState.progress,r)));
+    cctx.fillStyle='rgba(116,183,167,.28)';
+    cctx.fillRect(x1,y,Math.max(1,px-x1),h);
+  }
+  cctx.setLineDash([6,5]);
+  cctx.lineWidth=2;
+  cctx.strokeStyle='#2f8f7a';
+  cctx.beginPath(); cctx.moveTo(x1,y); cctx.lineTo(x1,y+h); cctx.moveTo(x2,y); cctx.lineTo(x2,y+h); cctx.stroke();
+  cctx.setLineDash([]);
+  cctx.fillStyle='#2f8f7a';
+  cctx.fillRect(x1-4,y,8,16);
+  cctx.fillRect(x2-4,y,8,16);
+  cctx.font='12px -apple-system,system-ui';
+  cctx.fillText(`再生 ${Math.max(0,playState.duration||1).toFixed(1)}s`, x1+6, y+16);
+  cctx.restore();
+}
 function drawNiceChart(){
   const canvasWidth = Math.max(view.getBoundingClientRect().width, window.innerWidth - 24);
   chart.style.width = canvasWidth + 'px';
@@ -766,11 +909,12 @@ function drawNiceChart(){
   for(let i=0;i<=maxPixels;i+=step){ const y=T+(h-T-B)*(1-i/maxPixels); cctx.beginPath(); cctx.moveTo(L,y); cctx.lineTo(w-R,y); cctx.stroke(); }
   cctx.strokeStyle='#c5d1ff'; cctx.lineWidth=1.5; cctx.strokeRect(L,T,w-L-R,h-T-B);
   cctx.fillStyle='#334'; cctx.font='13px -apple-system,system-ui';
-  for(let i=0;i<=10;i++){ const x=L+(w-L-R)*i/10; const time=(tMin + (tMax-tMin)*i/10).toFixed(1); cctx.fillText(time, x-14, h-22); }
+  for(let i=0;i<=10;i++){ const x=L+(w-L-R)*i/10; const time=formatAxisTime(tMin + (tMax-tMin)*i/10); cctx.fillText(time, x-24, h-22); }
   for(let i=0;i<=maxPixels;i+=step){ const y=T+(h-T-B)*(1-i/maxPixels); cctx.fillText(String(i), L-38, y+4); }
   cctx.font='14px -apple-system,system-ui';
-  cctx.fillText('時間 (秒)', w/2-28, h-8);
+  cctx.fillText('時刻', w/2-16, h-8);
   cctx.save(); cctx.translate(18, h/2+24); cctx.rotate(-Math.PI/2); cctx.fillText('画素座標 (x=青 / y=黄)', 0, 0); cctx.restore();
+  drawPlaybackWindow();
 
   if(series.length>=2){
     const recent=seriesForVisibleRange(series,tMin,tMax);
@@ -1267,9 +1411,38 @@ function segmentForTime(segments, mediaTime){
     return d<(best.d??Infinity)?{seg:s,d}:best;
   },{}).seg || null;
 }
-async function playMediaAround(mediaTime){
+function nearestSeriesAt(t){
+  if(!series.length) return null;
+  return series.reduce((best,s)=> Math.abs(s.t-t)<Math.abs((best?.t??0)-t)?s:best, series[0]);
+}
+function stopPlaybackTimer(){
+  if(playState.timer){ clearInterval(playState.timer); playState.timer=null; }
+  if(playState.currentAudio){ try{ playState.currentAudio.pause(); }catch{} playState.currentAudio=null; }
+}
+async function playSelectionAtChartTime(chartStart, duration=1.0){
+  if(!series.length) return;
+  playState.chartStart=chartStart;
+  playState.duration=Math.max(0.2,duration||1.0);
+  playState.progress=chartStart;
+  drawNiceChart();
+  const p=nearestSeriesAt(chartStart);
+  const mediaTime = p && typeof p.mediaTime==='number' ? p.mediaTime : (chartStart-(series[0]?.t||chartStart));
+  await playMediaAround(mediaTime, playState.duration, chartStart);
+  status.textContent=`記録再生: ${formatAxisTime(chartStart)} から約${playState.duration.toFixed(1)}秒`;
+}
+async function playMediaAround(mediaTime, playSeconds=1.0, chartStart=null){
   if(!isFinite(mediaTime)) return;
-  const playSeconds=3;
+  playSeconds=Math.max(0.2,playSeconds||1.0);
+  stopPlaybackTimer();
+  const progressStart = chartStart ?? (playState.chartStart ?? 0);
+  const progressStartedAt = performance.now();
+  playState.progress=progressStart;
+  playState.timer=setInterval(()=>{
+    const elapsed=(performance.now()-progressStartedAt)/1000;
+    playState.progress=Math.min(progressStart+playSeconds, progressStart+elapsed);
+    drawNiceChart();
+    if(elapsed>=playSeconds) stopPlaybackTimer();
+  },80);
   const videoSeg=segmentForTime(mediaRecordState.videoSegments, mediaTime);
   let videoBlob=videoSeg?.blob || (!mediaRecordState.videoSegments.length ? mediaRecordState.videoBlob : null);
   let videoOffset=videoSeg ? Math.max(0,mediaTime-videoSeg.start) : mediaTime;
@@ -1308,6 +1481,7 @@ async function playMediaAround(mediaTime){
     if(mediaRecordState.audioUrl) URL.revokeObjectURL(mediaRecordState.audioUrl);
     mediaRecordState.audioUrl=URL.createObjectURL(audioBlob);
     const au=new Audio(mediaRecordState.audioUrl);
+    playState.currentAudio=au;
     au.currentTime=Math.max(0,audioOffset);
     try{ await au.play(); }catch{}
     setTimeout(()=>{ try{au.pause();}catch{} }, playSeconds*1000);
@@ -1329,8 +1503,8 @@ async function showRecordedFrameAt(t){
       return;
     }
     if(combinedAudioBlob() || mediaRecordState.audioSegments.length){
-      await playMediaAround(mediaTime);
-      status.textContent=`音声再生: ${mediaTime.toFixed(2)}秒から約3秒`;
+      await playMediaAround(mediaTime, playState.duration || 1.0, t);
+      status.textContent=`音声再生: ${mediaTime.toFixed(2)}秒から約${(playState.duration||1).toFixed(1)}秒`;
       return;
     }
     status.textContent='録画/録音ファイルがまだありません。録画・録音するか、保存済みファイルを読み込んでください。';
@@ -1340,8 +1514,8 @@ async function showRecordedFrameAt(t){
     status.textContent='この時刻には録画との対応情報がありません。録画中に記録された点をクリックしてください。';
     return;
   }
-  await playMediaAround(mediaTime);
-  status.textContent=`記録再生: ${mediaTime.toFixed(2)}秒から約3秒`;
+  await playMediaAround(mediaTime, playState.duration || 1.0, t);
+  status.textContent=`記録再生: ${mediaTime.toFixed(2)}秒から約${(playState.duration||1).toFixed(1)}秒`;
 }
 
 
@@ -1794,7 +1968,7 @@ async function doInferenceOnce(){
     // 記録・グラフ
     if(recChk.checked && b){
       const nowSec = performance.now()/1000;
-      records.push({ t: nowSec, mediaTime: currentMediaTime(), id: 1, cls: 'template', x: b.x+b.w/2, y: b.y+b.h/2, emotion:'', emotionScore:'', emotionMethod:'', yaw:'', pitch:'', headHorizontal:'', headVertical:'', mouthOpen:'', mouthRatio:'', speech:'', volumeDb:'' });
+      records.push({ t: nowSec, ...dateFieldsFromT(nowSec), mediaTime: currentMediaTime(), id: 1, cls: 'template', x: b.x+b.w/2, y: b.y+b.h/2, emotion:'', emotionScore:'', emotionMethod:'', yaw:'', pitch:'', headHorizontal:'', headVertical:'', mouthOpen:'', mouthRatio:'', speech:'', volumeDb:'' });
       pushData(b.x+b.w/2, b.y+b.h/2);
       lastTgt = { id:1, name:'template', x:b.x+b.w/2, y:b.y+b.h/2 };
     } else {
@@ -1973,7 +2147,7 @@ async function doYoloInference(){
         const cx=tb.x+tb.w/2, cy=tb.y+tb.h/2;
         const emo = (tgt && tb.id===tgt.id) ? targetEmotion : null;
         const fm = (tgt && tb.id===tgt.id) ? faceMetrics : null;
-        records.push({ t: nowSec, mediaTime: currentMediaTime(), id: tb.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'', yaw:fm?.yawDeg??'', pitch:fm?.pitchDeg??'', headHorizontal:fm?.yawLabel||'', headVertical:fm?.pitchLabel||'', mouthOpen:fm?.mouthOpen??'', mouthRatio:fm?.mouthRatio??'', speech:audioMetrics?.speech??'', volumeDb:audioMetrics?.volumeDb??'' });
+        records.push({ t: nowSec, ...dateFieldsFromT(nowSec), mediaTime: currentMediaTime(), id: tb.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'', yaw:fm?.yawDeg??'', pitch:fm?.pitchDeg??'', headHorizontal:fm?.yawLabel||'', headVertical:fm?.pitchLabel||'', mouthOpen:fm?.mouthOpen??'', mouthRatio:fm?.mouthRatio??'', speech:audioMetrics?.speech??'', volumeDb:audioMetrics?.volumeDb??'' });
       }
     }else{
       yoloBoxes.forEach(b=>{
@@ -1986,7 +2160,7 @@ async function doYoloInference(){
           const cx=b.x+b.w/2, cy=b.y+b.h/2;
           const emo = (tgt && b.id===tgt.id) ? targetEmotion : null;
           const fm = (tgt && b.id===tgt.id) ? faceMetrics : null;
-          records.push({ t: nowSec, mediaTime: currentMediaTime(), id: b.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'', yaw:fm?.yawDeg??'', pitch:fm?.pitchDeg??'', headHorizontal:fm?.yawLabel||'', headVertical:fm?.pitchLabel||'', mouthOpen:fm?.mouthOpen??'', mouthRatio:fm?.mouthRatio??'', speech:audioMetrics?.speech??'', volumeDb:audioMetrics?.volumeDb??'' });
+          records.push({ t: nowSec, ...dateFieldsFromT(nowSec), mediaTime: currentMediaTime(), id: b.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'', yaw:fm?.yawDeg??'', pitch:fm?.pitchDeg??'', headHorizontal:fm?.yawLabel||'', headVertical:fm?.pitchLabel||'', mouthOpen:fm?.mouthOpen??'', mouthRatio:fm?.mouthRatio??'', speech:audioMetrics?.speech??'', volumeDb:audioMetrics?.volumeDb??'' });
         }
       });
     }
@@ -2021,7 +2195,7 @@ startBtn.onclick = async ()=>{
     status.textContent='カメラの許可を確認しています…';
     await openCamera();
     running=true; paused=false;
-    startBtn.disabled=true; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
+    startBtn.disabled=true; stopBtn.disabled=false; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
     saveVideoBtn.disabled=!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length);
     saveAudioBtn.disabled=!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length);
     modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false; emoMethodSel.disabled=false;
@@ -2058,10 +2232,15 @@ startBtn.onclick = async ()=>{
     stopCamera();
     running=false;
     startBtn.disabled=false;
+    stopBtn.disabled=true;
     const message=cameraErrorMessage(e);
     status.textContent=message;
     if(e && (e.name==='NotAllowedError' || e.name==='SecurityError')) alert(message);
   }
+};
+stopBtn.onclick = async ()=>{
+  if(!running && !camStream) return;
+  await stopApp();
 };
 pauseBtn.onclick = async ()=>{
   if(!running) return;
@@ -2086,15 +2265,16 @@ resetBtn.onclick = async ()=>{
 };
 dlBtn.onclick = ()=>{
   if(!records.length){ alert('記録がありません'); return; }
-  let csv='time,media_time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db\n';
+  let csv='time,datetime,date,clock,media_time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db\n';
   records.forEach(r=>{
+    const dt=r.datetime ? {datetime:r.datetime,date:r.date||'',clock:r.clock||''} : dateFieldsFromT(r.t);
     const score = typeof r.emotionScore==='number' ? r.emotionScore.toFixed(4) : '';
     const yaw = typeof r.yaw==='number' ? r.yaw.toFixed(2) : '';
     const pitch = typeof r.pitch==='number' ? r.pitch.toFixed(2) : '';
     const mouth = typeof r.mouthRatio==='number' ? r.mouthRatio.toFixed(4) : '';
     const vol = typeof r.volumeDb==='number' ? r.volumeDb.toFixed(2) : '';
     const mediaTime = typeof r.mediaTime==='number' ? r.mediaTime.toFixed(2) : '';
-    csv+=`${r.t.toFixed(2)},${mediaTime},${r.id},${r.cls},${r.x.toFixed(1)},${r.y.toFixed(1)},${r.emotion||''},${score},${r.emotionMethod||''},${yaw},${pitch},${r.headHorizontal||''},${r.headVertical||''},${r.mouthOpen ?? ''},${mouth},${r.speech ?? ''},${vol}\n`;
+    csv+=`${r.t.toFixed(2)},${dt.datetime},${dt.date},${dt.clock},${mediaTime},${r.id},${r.cls},${r.x.toFixed(1)},${r.y.toFixed(1)},${r.emotion||''},${score},${r.emotionMethod||''},${yaw},${pitch},${r.headHorizontal||''},${r.headVertical||''},${r.mouthOpen ?? ''},${mouth},${r.speech ?? ''},${vol}\n`;
   });
   const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download='record.csv'; a.click(); URL.revokeObjectURL(url);
@@ -2147,8 +2327,14 @@ loadCsvInput.addEventListener('change', async e=>{
   records=[]; series=[];
   for(const line of lines.slice(1)){
     const c=parseCsvLine(line);
+    const tVal=numOrBlank(c[idx.time]);
+    const fallbackDt=isFinite(tVal) ? dateFieldsFromT(tVal) : {datetime:'',date:'',clock:''};
     const r={
-      t:numOrBlank(c[idx.time]), mediaTime:numOrBlank(c[idx.media_time]), id:numOrBlank(c[idx.id]),
+      t:tVal,
+      datetime:c[idx.datetime]||fallbackDt.datetime,
+      date:c[idx.date]||fallbackDt.date,
+      clock:c[idx.clock]||fallbackDt.clock,
+      mediaTime:numOrBlank(c[idx.media_time]), id:numOrBlank(c[idx.id]),
       cls:c[idx.class]||'', x:numOrBlank(c[idx.x]), y:numOrBlank(c[idx.y]),
       emotion:c[idx.emotion]||'', emotionScore:numOrBlank(c[idx.emotion_score]), emotionMethod:c[idx.emotion_method]||'',
       yaw:numOrBlank(c[idx.yaw_deg]), pitch:numOrBlank(c[idx.pitch_deg]),
@@ -2158,7 +2344,7 @@ loadCsvInput.addEventListener('change', async e=>{
     };
     if(isFinite(r.t) && isFinite(r.x) && isFinite(r.y)){
       records.push(r);
-      series.push({t:r.t,x:r.x,y:r.y,mediaTime:r.mediaTime,emotion:r.emotion,emotionScore:r.emotionScore,emotionMethod:r.emotionMethod,yaw:r.yaw,pitch:r.pitch,headHorizontal:r.headHorizontal,headVertical:r.headVertical,mouthOpen:r.mouthOpen,mouthRatio:r.mouthRatio,speech:r.speech,volumeDb:r.volumeDb});
+      series.push({t:r.t,x:r.x,y:r.y,datetime:r.datetime,date:r.date,clock:r.clock,mediaTime:r.mediaTime,emotion:r.emotion,emotionScore:r.emotionScore,emotionMethod:r.emotionMethod,yaw:r.yaw,pitch:r.pitch,headHorizontal:r.headHorizontal,headVertical:r.headVertical,mouthOpen:r.mouthOpen,mouthRatio:r.mouthRatio,speech:r.speech,volumeDb:r.volumeDb});
     }
   }
   paused=true; pauseBtn.disabled=false; pauseBtn.textContent='▶ 再開'; dlBtn.disabled=false; resetBtn.disabled=false;

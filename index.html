@@ -75,6 +75,7 @@
 </style>
 
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
 <!-- ライブラリ読込後、セッション作成前に設定する -->
 <script>
   ort.env.wasm.numThreads = 1;
@@ -117,6 +118,10 @@
       <option value="off">OFF</option>
     </select>
   </label>
+  <label><input type="checkbox" id="plotHead" disabled checked> 顔向き</label>
+  <label><input type="checkbox" id="plotMouth" disabled checked> 口の開き</label>
+  <label><input type="checkbox" id="plotSpeech" disabled> 発話ON/OFF</label>
+  <label><input type="checkbox" id="plotVolume" disabled> 音量</label>
 
   <span id="boxInfo" class="pill">box: –</span>
     <span class="pill">映像FPS:<b id="vfps">0</b> / 推論FPS:<b id="ifps">0</b></span>
@@ -201,6 +206,14 @@
         <div>参考: <a href="https://arxiv.org/abs/1906.01551" target="_blank" rel="noreferrer">illumination/rotation robust correlation tracking</a>、<a href="https://arxiv.org/abs/1802.03098" target="_blank" rel="noreferrer">noise-robust tracking survey</a>、<a href="https://arxiv.org/abs/2112.12082" target="_blank" rel="noreferrer">adaptive Kalman noise estimation</a></div>
       </div>
     </details>
+    <details>
+      <summary>👀 顔向き・口・発話の根拠</summary>
+      <div class="meta">
+        <div>顔向きと口の開きは MediaPipe Face Mesh の468点3D顔ランドマークを使います。口は唇ランドマークの Mouth Aspect Ratio（MAR）で推定します。</div>
+        <div>発話ON/OFFはマイク音声の短時間RMS/dBと適応ノイズ床による軽量VADです。</div>
+        <div>参考: <a href="https://arxiv.org/abs/1906.08172" target="_blank" rel="noreferrer">MediaPipe</a>、<a href="https://github.com/google-ai-edge/mediapipe" target="_blank" rel="noreferrer">MediaPipe GitHub</a>、<a href="https://github.com/wiseman/py-webrtcvad" target="_blank" rel="noreferrer">WebRTC VAD実装例</a>、<a href="https://arxiv.org/abs/1903.02844" target="_blank" rel="noreferrer">robust VAD study</a></div>
+      </div>
+    </details>
   </aside>
   </div>
 </div>
@@ -234,6 +247,10 @@ const clsSel  = document.getElementById('cls');
 const idSel   = document.getElementById('idSel');
 const recChk  = document.getElementById('rec');
 const emoMethodSel = document.getElementById('emoMethod');
+const plotHeadChk = document.getElementById('plotHead');
+const plotMouthChk = document.getElementById('plotMouth');
+const plotSpeechChk = document.getElementById('plotSpeech');
+const plotVolumeChk = document.getElementById('plotVolume');
 
 const vfpsEl = document.getElementById('vfps');
 const ifpsEl = document.getElementById('ifps');
@@ -274,6 +291,13 @@ const emotionState = {
   errors: {},
   last: null,
   lastTs: 0
+};
+const faceMetricsState = {
+  mesh:null, ready:false, busy:false, last:null, lastTs:0, error:null
+};
+const audioState = {
+  ctx:null, analyser:null, data:null, stream:null, last:null,
+  noiseDb:-62, speechUntil:0, error:null
 };
 /* ▼▼ スライダ値（いつでも変更可能） */
 const P = {
@@ -486,6 +510,8 @@ emoMethodSel.addEventListener('change', ()=>{
   emotionState.last=null;
   emotionState.lastTs=0;
 });
+plotSpeechChk.addEventListener('change', ()=>{ if(plotSpeechChk.checked) ensureAudio(); });
+plotVolumeChk.addEventListener('change', ()=>{ if(plotVolumeChk.checked) ensureAudio(); });
 
 /* ===== FPS（映像） ===== */
 function meterVideo(){
@@ -500,13 +526,21 @@ function meterVideo(){
 }
 
 /* ===== グラフ ===== */
-function pushData(x,y,emotion=null){
+function pushData(x,y,emotion=null,faceMetrics=null,audioMetrics=null){
   const t=(performance.now()/1000).toFixed(2);
   series.push({
     t:+t,x,y,
     emotion: emotion?.label || '',
     emotionScore: emotion?.score || '',
-    emotionMethod: emotion?.method || ''
+    emotionMethod: emotion?.method || '',
+    yaw: faceMetrics?.yawDeg ?? '',
+    pitch: faceMetrics?.pitchDeg ?? '',
+    headHorizontal: faceMetrics?.yawLabel || '',
+    headVertical: faceMetrics?.pitchLabel || '',
+    mouthOpen: faceMetrics?.mouthOpen ?? '',
+    mouthRatio: faceMetrics?.mouthRatio ?? '',
+    speech: audioMetrics?.speech ?? '',
+    volumeDb: audioMetrics?.volumeDb ?? ''
   });
   if(series.length>1200) series.shift();
 }
@@ -548,6 +582,22 @@ function drawNiceChart(){
       recent.forEach((p,i)=>{const X=xS(p.t),Y=ySY(p.y); if(i==0)cctx.moveTo(X,Y); else cctx.lineTo(X,Y);}); cctx.stroke(); cctx.setLineDash([]);
       cctx.fillStyle='#f6a000';
       for(let i=0;i<recent.length;i+=Math.max(1,Math.floor(recent.length/40))){const X=xS(recent[i].t),Y=ySY(recent[i].y); cctx.fillRect(X-2,Y-2,4,4);}
+      const drawMetric=(enabled,key,color,label,min,max,dash=[])=>{
+        if(!enabled) return;
+        const pts=recent.filter(p=>p[key]!=='' && p[key]!=null && isFinite(+p[key]));
+        if(pts.length<2) return;
+        const yM=v=>T+(h-T-B)*(1 - Math.max(0,Math.min(1,(v-min)/(max-min))));
+        cctx.save(); cctx.beginPath(); cctx.strokeStyle=color; cctx.lineWidth=2; cctx.setLineDash(dash);
+        pts.forEach((p,i)=>{const X=xS(p.t),Y=yM(+p[key]); if(i===0)cctx.moveTo(X,Y); else cctx.lineTo(X,Y);});
+        cctx.stroke(); cctx.setLineDash([]);
+        const p=pts[pts.length-1]; cctx.fillStyle=color; cctx.font='12px -apple-system,system-ui'; cctx.fillText(label,xS(p.t)+6,yM(+p[key])-4);
+        cctx.restore();
+      };
+      drawMetric(plotHeadChk.checked,'yaw','#8b5cf6','yaw',-45,45,[4,3]);
+      drawMetric(plotHeadChk.checked,'pitch','#06b6d4','pitch',-45,45,[2,3]);
+      drawMetric(plotMouthChk.checked,'mouthRatio','#f97316','mouth',0,0.75);
+      drawMetric(plotSpeechChk.checked,'speech','#ef4444','speech',0,1,[8,4]);
+      drawMetric(plotVolumeChk.checked,'volumeDb','#22c55e','dB',-80,-20);
       cctx.font='12px -apple-system,system-ui';
       let lastEmotion='', lastLabelT=-999;
       recent.forEach(p=>{
@@ -727,6 +777,100 @@ async function analyzeEmotionForBox(box){
     status.textContent='表情推論に失敗: '+(e.message||e);
     return emotionState.last;
   }
+}
+
+function dist2(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+function sub3(a,b){ return [a.x-b.x,a.y-b.y,(a.z||0)-(b.z||0)]; }
+function cross3(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function faceDirectionFromLandmarks(lm){
+  const leftEye=lm[33], rightEye=lm[263], nose=lm[1], forehead=lm[10], chin=lm[152];
+  const lipTop=lm[13], lipBottom=lm[14], lipL=lm[61], lipR=lm[291];
+  if(!(leftEye&&rightEye&&nose&&forehead&&chin&&lipTop&&lipBottom&&lipL&&lipR)) return null;
+  const eyeMid={x:(leftEye.x+rightEye.x)/2,y:(leftEye.y+rightEye.y)/2,z:((leftEye.z||0)+(rightEye.z||0))/2};
+  const eyeDist=Math.max(1e-6,dist2(leftEye,rightEye));
+  const faceH=Math.max(1e-6,dist2(forehead,chin));
+  const yawNorm=(nose.x-eyeMid.x)/eyeDist;
+  const pitchNorm=(nose.y-eyeMid.y)/faceH;
+  const normal=cross3(sub3(rightEye,leftEye),sub3(chin,forehead));
+  const yawDeg=Math.max(-60,Math.min(60,yawNorm*120));
+  const pitchDeg=Math.max(-60,Math.min(60,(0.38-pitchNorm)*140 + Math.atan2(normal[1],Math.abs(normal[2])+1e-6)*18));
+  const yawLabel = yawDeg>10 ? 'right' : (yawDeg<-10 ? 'left' : 'center');
+  const pitchLabel = pitchDeg>10 ? 'up' : (pitchDeg<-10 ? 'down' : 'level');
+  const mouthRatio=dist2(lipTop,lipBottom)/Math.max(1e-6,dist2(lipL,lipR));
+  return {
+    yawDeg,pitchDeg,yawLabel,pitchLabel,
+    mouthRatio,
+    mouthOpen: mouthRatio>0.28 ? 1 : 0
+  };
+}
+async function ensureFaceMesh(){
+  if(faceMetricsState.mesh) return faceMetricsState.mesh;
+  if(faceMetricsState.error) return null;
+  if(typeof FaceMesh==='undefined'){
+    faceMetricsState.error=new Error('MediaPipe FaceMesh が読み込めません');
+    status.textContent='顔向き解析ライブラリを読み込めません';
+    return null;
+  }
+  const mesh=new FaceMesh({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+  mesh.setOptions({maxNumFaces:1,refineLandmarks:true,minDetectionConfidence:0.55,minTrackingConfidence:0.55});
+  mesh.onResults((res)=>{
+    const lm=res.multiFaceLandmarks && res.multiFaceLandmarks[0];
+    const metrics=lm ? faceDirectionFromLandmarks(lm) : null;
+    if(metrics){ faceMetricsState.last=metrics; faceMetricsState.lastTs=performance.now(); }
+    faceMetricsState.busy=false;
+  });
+  faceMetricsState.mesh=mesh;
+  return mesh;
+}
+async function analyzeFaceMetrics(){
+  if(!(plotHeadChk.checked || plotMouthChk.checked)) return null;
+  const now=performance.now();
+  if(faceMetricsState.last && now-faceMetricsState.lastTs<220) return faceMetricsState.last;
+  if(faceMetricsState.busy) return faceMetricsState.last;
+  const mesh=await ensureFaceMesh();
+  if(!mesh) return faceMetricsState.last;
+  try{
+    faceMetricsState.busy=true;
+    await mesh.send({image:vid});
+  }catch(e){
+    faceMetricsState.busy=false;
+    faceMetricsState.error=e;
+    console.warn('FaceMesh解析に失敗しました',e);
+  }
+  return faceMetricsState.last;
+}
+async function ensureAudio(){
+  if(audioState.analyser) return true;
+  if(audioState.error) return false;
+  try{
+    audioState.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+    audioState.ctx=new (window.AudioContext||window.webkitAudioContext)();
+    const src=audioState.ctx.createMediaStreamSource(audioState.stream);
+    audioState.analyser=audioState.ctx.createAnalyser();
+    audioState.analyser.fftSize=1024;
+    audioState.data=new Float32Array(audioState.analyser.fftSize);
+    src.connect(audioState.analyser);
+    return true;
+  }catch(e){
+    audioState.error=e;
+    status.textContent='マイクを開始できません: '+(e.message||e);
+    return false;
+  }
+}
+function readAudioMetrics(){
+  if(!(plotSpeechChk.checked || plotVolumeChk.checked) || !audioState.analyser) return audioState.last;
+  audioState.analyser.getFloatTimeDomainData(audioState.data);
+  let sum=0, zc=0, prev=audioState.data[0]||0;
+  for(const v of audioState.data){ sum+=v*v; if((v>=0)!=(prev>=0)) zc++; prev=v; }
+  const rms=Math.sqrt(sum/audioState.data.length);
+  const db=20*Math.log10(rms+1e-8);
+  const now=performance.now();
+  const active = db>Math.max(-52,audioState.noiseDb+9) && rms>0.008;
+  if(active) audioState.speechUntil=now+280;
+  else audioState.noiseDb=0.985*audioState.noiseDb+0.015*db;
+  const speech = now<audioState.speechUntil ? 1 : 0;
+  audioState.last={speech,volumeDb:db,noiseDb:audioState.noiseDb,zeroCrossingRate:zc/audioState.data.length};
+  return audioState.last;
 }
 
 
@@ -1178,7 +1322,7 @@ async function doInferenceOnce(){
     // 記録・グラフ
     if(recChk.checked && b){
       const nowSec = performance.now()/1000;
-      records.push({ t: nowSec, id: 1, cls: 'template', x: b.x+b.w/2, y: b.y+b.h/2, emotion:'', emotionScore:'', emotionMethod:'' });
+      records.push({ t: nowSec, id: 1, cls: 'template', x: b.x+b.w/2, y: b.y+b.h/2, emotion:'', emotionScore:'', emotionMethod:'', yaw:'', pitch:'', headHorizontal:'', headVertical:'', mouthOpen:'', mouthRatio:'', speech:'', volumeDb:'' });
       if(records.length>5000) records.shift();
       pushData(b.x+b.w/2, b.y+b.h/2);
       lastTgt = { id:1, name:'template', x:b.x+b.w/2, y:b.y+b.h/2 };
@@ -1346,6 +1490,9 @@ async function doYoloInference(){
     else { const ci=Number(wantClass); tgt = yoloBoxes.filter(b=>b.cls===ci).sort((a,b)=> (b.score||0)-(a.score||0))[0]||null; }
   }
   const targetEmotion = tgt ? await analyzeEmotionForBox(tgt) : null;
+  const faceMetrics = tgt ? await analyzeFaceMetrics(tgt) : null;
+  if((plotSpeechChk.checked || plotVolumeChk.checked) && !audioState.analyser) await ensureAudio();
+  const audioMetrics = readAudioMetrics();
   // 記録処理も yoloBoxes 参照に統一
   if(recChk.checked){
     if(wantId!=='auto'){
@@ -1354,7 +1501,8 @@ async function doYoloInference(){
         const name=(tb.cls==='face-yolo')?'face(YOLO)':(tb.cls==='face-device')?'face(Device)':(COCO80[tb.cls]||('cls'+tb.cls));
         const cx=tb.x+tb.w/2, cy=tb.y+tb.h/2;
         const emo = (tgt && tb.id===tgt.id) ? targetEmotion : null;
-        records.push({ t: nowSec, id: tb.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'' });
+        const fm = (tgt && tb.id===tgt.id) ? faceMetrics : null;
+        records.push({ t: nowSec, id: tb.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'', yaw:fm?.yawDeg??'', pitch:fm?.pitchDeg??'', headHorizontal:fm?.yawLabel||'', headVertical:fm?.pitchLabel||'', mouthOpen:fm?.mouthOpen??'', mouthRatio:fm?.mouthRatio??'', speech:audioMetrics?.speech??'', volumeDb:audioMetrics?.volumeDb??'' });
         if(records.length>5000) records.shift();
       }
     }else{
@@ -1367,7 +1515,8 @@ async function doYoloInference(){
         if(match){
           const cx=b.x+b.w/2, cy=b.y+b.h/2;
           const emo = (tgt && b.id===tgt.id) ? targetEmotion : null;
-          records.push({ t: nowSec, id: b.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'' });
+          const fm = (tgt && b.id===tgt.id) ? faceMetrics : null;
+          records.push({ t: nowSec, id: b.id, cls: name, x: cx, y: cy, emotion:emo?.label||'', emotionScore:emo?.score||'', emotionMethod:emo?.method||'', yaw:fm?.yawDeg??'', pitch:fm?.pitchDeg??'', headHorizontal:fm?.yawLabel||'', headVertical:fm?.pitchLabel||'', mouthOpen:fm?.mouthOpen??'', mouthRatio:fm?.mouthRatio??'', speech:audioMetrics?.speech??'', volumeDb:audioMetrics?.volumeDb??'' });
           if(records.length>5000) records.shift();
         }
       });
@@ -1376,8 +1525,10 @@ async function doYoloInference(){
   if(tgt){
     const cx=tgt.x+tgt.w/2, cy=tgt.y+tgt.h/2;
     const name=(tgt.cls==='face-yolo')?'face(YOLO)':(tgt.cls==='face-device')?'face(Device)':(COCO80[tgt.cls]||('cls'+tgt.cls));
-    lastTgt = { id: tgt.id, name, x: cx, y: cy, emotion:targetEmotion?.label||'' };
-    pushData(cx,cy,targetEmotion);
+    const headTxt = faceMetrics ? ` ${faceMetrics.yawLabel}/${faceMetrics.pitchLabel} mouth:${faceMetrics.mouthOpen?'open':'closed'}` : '';
+    const speechTxt = audioMetrics && plotSpeechChk.checked ? ` speech:${audioMetrics.speech?'ON':'OFF'}` : '';
+    lastTgt = { id: tgt.id, name, x: cx, y: cy, emotion:(targetEmotion?.label||'') + headTxt + speechTxt };
+    pushData(cx,cy,targetEmotion,faceMetrics,audioMetrics);
   } else {
     lastTgt = null;
   }
@@ -1403,6 +1554,7 @@ startBtn.onclick = async ()=>{
     running=true; paused=false;
     startBtn.disabled=true; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
     modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false; emoMethodSel.disabled=false;
+    plotHeadChk.disabled=false; plotMouthChk.disabled=false; plotSpeechChk.disabled=false; plotVolumeChk.disabled=false;
 
     buildClassSelectFor(modeSel.value);
     meterVideo();
@@ -1442,10 +1594,14 @@ pauseBtn.onclick = ()=>{ if(!running) return; paused=!paused; pauseBtn.textConte
 resetBtn.onclick = ()=> resetData();
 dlBtn.onclick = ()=>{
   if(!records.length){ alert('記録がありません'); return; }
-  let csv='time,id,class,x,y,emotion,emotion_score,emotion_method\n';
+  let csv='time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db\n';
   records.forEach(r=>{
     const score = typeof r.emotionScore==='number' ? r.emotionScore.toFixed(4) : '';
-    csv+=`${r.t.toFixed(2)},${r.id},${r.cls},${r.x.toFixed(1)},${r.y.toFixed(1)},${r.emotion||''},${score},${r.emotionMethod||''}\n`;
+    const yaw = typeof r.yaw==='number' ? r.yaw.toFixed(2) : '';
+    const pitch = typeof r.pitch==='number' ? r.pitch.toFixed(2) : '';
+    const mouth = typeof r.mouthRatio==='number' ? r.mouthRatio.toFixed(4) : '';
+    const vol = typeof r.volumeDb==='number' ? r.volumeDb.toFixed(2) : '';
+    csv+=`${r.t.toFixed(2)},${r.id},${r.cls},${r.x.toFixed(1)},${r.y.toFixed(1)},${r.emotion||''},${score},${r.emotionMethod||''},${yaw},${pitch},${r.headHorizontal||''},${r.headVertical||''},${r.mouthOpen ?? ''},${mouth},${r.speech ?? ''},${vol}\n`;
   });
   const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download='record.csv'; a.click(); URL.revokeObjectURL(url);

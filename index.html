@@ -97,11 +97,19 @@
 </script>
 
 <header>
-  <div class="appTitle">memo <span class="ver">v2026.07.09.4</span></div>
+  <div class="appTitle">memo <span class="ver">v2026.07.09.5</span></div>
   <button id="start">▶ カメラ開始</button>
   <button id="pause" disabled>⏸ 一時停止</button>
   <button id="reset" disabled>🧹 データリセット</button>
   <button id="download" disabled>⬇ CSV保存</button>
+  <button id="saveVideo" disabled>🎥 録画保存</button>
+  <button id="saveAudio" disabled>🎙 録音保存</button>
+  <button id="loadCsvBtn">📄 CSV読込</button>
+  <button id="loadVideoBtn">🎞 録画読込</button>
+  <button id="loadAudioBtn">🔊 音声読込</button>
+  <input id="loadCsv" type="file" accept=".csv,text/csv" hidden>
+  <input id="loadVideo" type="file" accept="video/*,.webm" hidden>
+  <input id="loadAudio" type="file" accept="audio/*,.webm" hidden>
 
   <label>モード:
     <select id="mode" disabled>
@@ -256,6 +264,14 @@ const startBtn = document.getElementById('start');
 const pauseBtn = document.getElementById('pause');
 const resetBtn = document.getElementById('reset');
 const dlBtn    = document.getElementById('download');
+const saveVideoBtn = document.getElementById('saveVideo');
+const saveAudioBtn = document.getElementById('saveAudio');
+const loadCsvBtn = document.getElementById('loadCsvBtn');
+const loadVideoBtn = document.getElementById('loadVideoBtn');
+const loadAudioBtn = document.getElementById('loadAudioBtn');
+const loadCsvInput = document.getElementById('loadCsv');
+const loadVideoInput = document.getElementById('loadVideo');
+const loadAudioInput = document.getElementById('loadAudio');
 
 const modeSel = document.getElementById('mode');
 const clsSel  = document.getElementById('cls');
@@ -323,6 +339,8 @@ const mediaRecordState = {
   videoChunks:[], audioChunks:[],
   videoUrl:null, audioUrl:null,
   videoBlob:null, audioBlob:null,
+  videoSegments:[], audioSegments:[],
+  videoSegmentStart:0, audioSegmentStart:0,
   discardVideoOnStop:false, discardAudioOnStop:false,
   startPerf:0, pausedAccumMs:0, pauseStartedPerf:0,
   videoStartPerf:0, audioStartPerf:0,
@@ -384,6 +402,7 @@ const tplScoreEl=document.getElementById('tplScore');
 
 /* ===== 状態 ===== */
 let W=640, H=360;
+view.width=W; view.height=H;
 let running=false, paused=false;
 let coco11Session=null, coco26Session=null, faceSession=null;
 let coco26LoadPromise=null, coco26LoadError=null;
@@ -678,8 +697,7 @@ function resumeMediaClock(){
 }
 function currentMediaTime(){
   if(!mediaRecordState.startPerf || !anyRecorderActive()) return '';
-  const pausedNow = mediaRecordState.pauseStartedPerf ? performance.now() - mediaRecordState.pauseStartedPerf : 0;
-  return Math.max(0,(performance.now() - mediaRecordState.startPerf - mediaRecordState.pausedAccumMs - pausedNow)/1000);
+  return mediaElapsedSeconds();
 }
 function timeCodeFromPerf(perf){
   if(!perf) return '未記録';
@@ -703,10 +721,12 @@ function formatRecInfo(startPerf, state, saved, armed=false){
 function updateRecordBadges(){
   const vState=mediaRecordState.videoRecorder?.state || 'inactive';
   const aState=mediaRecordState.audioRecorder?.state || 'inactive';
-  videoRecInfo.textContent=formatRecInfo(mediaRecordState.videoStartPerf,vState,!!mediaRecordState.videoBlob,recordVideoChk.checked);
-  audioRecInfo.textContent=formatRecInfo(mediaRecordState.audioStartPerf,aState,!!mediaRecordState.audioBlob,recordAudioChk.checked);
-  videoRecInfo.className='recInfo '+(vState==='recording'?'active':(vState==='paused'?'paused':(mediaRecordState.videoBlob?'saved':'')));
-  audioRecInfo.className='recInfo '+(aState==='recording'?'active':(aState==='paused'?'paused':(mediaRecordState.audioBlob?'saved':'')));
+  videoRecInfo.textContent=formatRecInfo(mediaRecordState.videoStartPerf,vState,!!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length),recordVideoChk.checked);
+  audioRecInfo.textContent=formatRecInfo(mediaRecordState.audioStartPerf,aState,!!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length),recordAudioChk.checked);
+  videoRecInfo.className='recInfo '+(vState==='recording'?'active':(vState==='paused'?'paused':((mediaRecordState.videoBlob||mediaRecordState.videoSegments.length)?'saved':'')));
+  audioRecInfo.className='recInfo '+(aState==='recording'?'active':(aState==='paused'?'paused':((mediaRecordState.audioBlob||mediaRecordState.audioSegments.length)?'saved':'')));
+  if(saveVideoBtn) saveVideoBtn.disabled=!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length);
+  if(saveAudioBtn) saveAudioBtn.disabled=!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length);
 }
 function seriesForVisibleRange(data,tMin,tMax){
   if(data.length<2) return data.filter(p=>p.t>=tMin && p.t<=tMax);
@@ -1076,6 +1096,11 @@ function anyRecorderActive(){
   return (mediaRecordState.videoRecorder && mediaRecordState.videoRecorder.state!=='inactive') ||
          (mediaRecordState.audioRecorder && mediaRecordState.audioRecorder.state!=='inactive');
 }
+function mediaElapsedSeconds(){
+  if(!mediaRecordState.startPerf) return 0;
+  const pausedNow = mediaRecordState.pauseStartedPerf ? performance.now() - mediaRecordState.pauseStartedPerf : 0;
+  return Math.max(0,(performance.now() - mediaRecordState.startPerf - mediaRecordState.pausedAccumMs - pausedNow)/1000);
+}
 function downloadBlob(blob, name){
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -1084,14 +1109,7 @@ function downloadBlob(blob, name){
   return url;
 }
 async function startVideoRecording(){
-  if(mediaRecordState.videoRecorder){
-    if(mediaRecordState.videoRecorder.state==='paused'){
-      resumeMediaClock();
-      mediaRecordState.videoRecorder.resume();
-    }
-    updateRecordBadges();
-    return;
-  }
+  if(mediaRecordState.videoRecorder) return;
   if(!camStream) return;
   const tracks=[...camStream.getVideoTracks()];
   if(recordAudioChk.checked){
@@ -1102,6 +1120,8 @@ async function startVideoRecording(){
   const mime=bestMime(['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']);
   mediaRecordState.videoChunks=[];
   startMediaClockIfNeeded();
+  resumeMediaClock();
+  mediaRecordState.videoSegmentStart=mediaElapsedSeconds();
   mediaRecordState.videoStartPerf=performance.now();
   mediaRecordState.videoRecorder=new MediaRecorder(stream, mime?{mimeType:mime}:{});
   mediaRecordState.videoRecorder.ondataavailable=e=>{ if(e.data&&e.data.size) mediaRecordState.videoChunks.push(e.data); };
@@ -1114,12 +1134,15 @@ async function startVideoRecording(){
       updateRecordBadges();
       return;
     }
+    const end=mediaElapsedSeconds();
     const blob=new Blob(mediaRecordState.videoChunks,{type:mime||'video/webm'});
-    mediaRecordState.videoBlob=blob;
-    downloadBlob(blob,'camera_record.webm');
+    if(blob.size){
+      mediaRecordState.videoSegments.push({blob,start:mediaRecordState.videoSegmentStart,end,duration:Math.max(0,end-mediaRecordState.videoSegmentStart)});
+      mediaRecordState.videoBlob=new Blob(mediaRecordState.videoSegments.map(s=>s.blob),{type:mime||'video/webm'});
+    }
     mediaRecordState.videoRecorder=null;
     updateRecordBadges();
-    status.textContent='録画を保存しました。グラフをクリックすると録画フレームを表示できます。';
+    status.textContent='録画を一時停止しました。録画保存ボタンで保存できます。';
   };
   mediaRecordState.videoRecorder.start(1000);
   updateRecordBadges();
@@ -1127,22 +1150,22 @@ async function startVideoRecording(){
 }
 async function stopVideoRecording(){
   const r=mediaRecordState.videoRecorder;
-  if(r && r.state!=='inactive') r.stop();
+  if(r && r.state!=='inactive'){
+    await new Promise(resolve=>{
+      r.addEventListener('stop', resolve, {once:true});
+      r.stop();
+    });
+  }
 }
 async function startAudioRecording(){
-  if(mediaRecordState.audioRecorder){
-    if(mediaRecordState.audioRecorder.state==='paused'){
-      resumeMediaClock();
-      mediaRecordState.audioRecorder.resume();
-    }
-    updateRecordBadges();
-    return;
-  }
+  if(mediaRecordState.audioRecorder) return;
   await ensureAudio();
   if(!audioState.stream) return;
   const mime=bestMime(['audio/webm;codecs=opus','audio/webm']);
   mediaRecordState.audioChunks=[];
   startMediaClockIfNeeded();
+  resumeMediaClock();
+  mediaRecordState.audioSegmentStart=mediaElapsedSeconds();
   mediaRecordState.audioStartPerf=performance.now();
   mediaRecordState.audioRecorder=new MediaRecorder(audioState.stream,mime?{mimeType:mime}:{});
   mediaRecordState.audioRecorder.ondataavailable=e=>{ if(e.data&&e.data.size) mediaRecordState.audioChunks.push(e.data); };
@@ -1155,9 +1178,12 @@ async function startAudioRecording(){
       updateRecordBadges();
       return;
     }
+    const end=mediaElapsedSeconds();
     const blob=new Blob(mediaRecordState.audioChunks,{type:mime||'audio/webm'});
-    mediaRecordState.audioBlob=blob;
-    downloadBlob(blob,'audio_record.webm');
+    if(blob.size){
+      mediaRecordState.audioSegments.push({blob,start:mediaRecordState.audioSegmentStart,end,duration:Math.max(0,end-mediaRecordState.audioSegmentStart)});
+      mediaRecordState.audioBlob=new Blob(mediaRecordState.audioSegments.map(s=>s.blob),{type:mime||'audio/webm'});
+    }
     mediaRecordState.audioRecorder=null;
     updateRecordBadges();
   };
@@ -1167,19 +1193,22 @@ async function startAudioRecording(){
 }
 async function stopAudioRecording(){
   const r=mediaRecordState.audioRecorder;
-  if(r && r.state!=='inactive') r.stop();
+  if(r && r.state!=='inactive'){
+    await new Promise(resolve=>{
+      r.addEventListener('stop', resolve, {once:true});
+      r.stop();
+    });
+  }
 }
-function pauseMediaRecorders(){
+async function pauseMediaRecorders(){
   const v=mediaRecordState.videoRecorder;
   const a=mediaRecordState.audioRecorder;
   if((v && v.state==='recording') || (a && a.state==='recording')) pauseMediaClock();
-  if(v && v.state==='recording') v.pause();
-  if(a && a.state==='recording') a.pause();
+  if(v && v.state==='recording') await stopVideoRecording();
+  if(a && a.state==='recording') await stopAudioRecording();
   updateRecordBadges();
 }
 async function resumeOrStartMediaRecorders(){
-  if((recordVideoChk.checked && mediaRecordState.videoRecorder?.state==='paused') ||
-     (recordAudioChk.checked && mediaRecordState.audioRecorder?.state==='paused')) resumeMediaClock();
   if(recordVideoChk.checked) await startVideoRecording();
   if(recordAudioChk.checked) await startAudioRecording();
   updateRecordBadges();
@@ -1199,6 +1228,10 @@ async function resetRecordings(){
   mediaRecordState.audioChunks=[];
   mediaRecordState.videoBlob=null;
   mediaRecordState.audioBlob=null;
+  mediaRecordState.videoSegments=[];
+  mediaRecordState.audioSegments=[];
+  mediaRecordState.videoSegmentStart=0;
+  mediaRecordState.audioSegmentStart=0;
   if(!hasVideoRecorder) mediaRecordState.discardVideoOnStop=false;
   if(!hasAudioRecorder) mediaRecordState.discardAudioOnStop=false;
   mediaRecordState.startPerf=0;
@@ -1215,10 +1248,76 @@ function timeAtChartEvent(e){
   const ratio=(x-r.L)/(r.w-r.L-r.R);
   return r.tMin + Math.max(0,Math.min(1,ratio))*(r.tMax-r.tMin);
 }
+function combinedVideoBlob(){
+  if(mediaRecordState.videoSegments.length){
+    return new Blob(mediaRecordState.videoSegments.map(s=>s.blob),{type:mediaRecordState.videoSegments[0].blob.type || 'video/webm'});
+  }
+  return mediaRecordState.videoBlob;
+}
+function combinedAudioBlob(){
+  if(mediaRecordState.audioSegments.length){
+    return new Blob(mediaRecordState.audioSegments.map(s=>s.blob),{type:mediaRecordState.audioSegments[0].blob.type || 'audio/webm'});
+  }
+  return mediaRecordState.audioBlob;
+}
+function segmentForTime(segments, mediaTime){
+  if(!segments.length) return null;
+  return segments.find(s=>mediaTime>=s.start && mediaTime<=s.end+0.25) || segments.reduce((best,s)=>{
+    const d=Math.min(Math.abs(mediaTime-s.start),Math.abs(mediaTime-s.end));
+    return d<(best.d??Infinity)?{seg:s,d}:best;
+  },{}).seg || null;
+}
+async function playMediaAround(mediaTime){
+  if(!isFinite(mediaTime)) return;
+  const playSeconds=3;
+  const videoSeg=segmentForTime(mediaRecordState.videoSegments, mediaTime);
+  let videoBlob=videoSeg?.blob || (!mediaRecordState.videoSegments.length ? mediaRecordState.videoBlob : null);
+  let videoOffset=videoSeg ? Math.max(0,mediaTime-videoSeg.start) : mediaTime;
+  if(videoBlob){
+    let rv=mediaRecordState.replayVideo;
+    if(!rv){
+      rv=document.createElement('video');
+      rv.muted=true; rv.playsInline=true; rv.preload='auto';
+      mediaRecordState.replayVideo=rv;
+    }
+    if(mediaRecordState.videoUrl) URL.revokeObjectURL(mediaRecordState.videoUrl);
+    mediaRecordState.videoUrl=URL.createObjectURL(videoBlob);
+    rv.src=mediaRecordState.videoUrl;
+    await new Promise(resolve=>{ rv.onloadedmetadata=resolve; if(rv.readyState>=1) resolve(); });
+    rv.currentTime=Math.max(0,Math.min(rv.duration||videoOffset,videoOffset));
+    await new Promise(resolve=>{ rv.onseeked=resolve; setTimeout(resolve,900); });
+    try{ await rv.play(); }catch{}
+    const drawUntil=performance.now()+playSeconds*1000;
+    const drawReplay=()=>{
+      if(rv.paused || performance.now()>drawUntil){
+        rv.pause();
+        reviewingFrame=true;
+        return;
+      }
+      try{ vctx.drawImage(rv,0,0,view.width,view.height); }catch{}
+      requestAnimationFrame(drawReplay);
+    };
+    reviewingFrame=true;
+    drawReplay();
+    setTimeout(()=>{ try{rv.pause();}catch{} }, playSeconds*1000);
+  }
+  const audioSeg=segmentForTime(mediaRecordState.audioSegments, mediaTime);
+  const audioBlob=audioSeg?.blob || (!mediaRecordState.audioSegments.length ? mediaRecordState.audioBlob : null);
+  const audioOffset=audioSeg ? Math.max(0,mediaTime-audioSeg.start) : mediaTime;
+  if(audioBlob){
+    if(mediaRecordState.audioUrl) URL.revokeObjectURL(mediaRecordState.audioUrl);
+    mediaRecordState.audioUrl=URL.createObjectURL(audioBlob);
+    const au=new Audio(mediaRecordState.audioUrl);
+    au.currentTime=Math.max(0,audioOffset);
+    try{ await au.play(); }catch{}
+    setTimeout(()=>{ try{au.pause();}catch{} }, playSeconds*1000);
+  }
+}
 async function showRecordedFrameAt(t){
   if(!series.length) return;
   const p=series.reduce((best,s)=> Math.abs(s.t-t)<Math.abs((best?.t??0)-t)?s:best, series[0]);
-  if(!mediaRecordState.videoBlob){
+  const mediaTime = p && typeof p.mediaTime==='number' ? p.mediaTime : (t-(series[0]?.t||t));
+  if(!combinedVideoBlob() && !mediaRecordState.videoSegments.length){
     const snap=nearestSnapshot(p?.t ?? t);
     if(snap){
       const img=new Image();
@@ -1229,33 +1328,20 @@ async function showRecordedFrameAt(t){
       status.textContent=`記録中スナップショット表示: ${snapTime}`;
       return;
     }
-    status.textContent='録画ファイルがまだ確定していません。カメラ録画を停止するか、記録中スナップショットがある点をクリックしてください。';
+    if(combinedAudioBlob() || mediaRecordState.audioSegments.length){
+      await playMediaAround(mediaTime);
+      status.textContent=`音声再生: ${mediaTime.toFixed(2)}秒から約3秒`;
+      return;
+    }
+    status.textContent='録画/録音ファイルがまだありません。録画・録音するか、保存済みファイルを読み込んでください。';
     return;
   }
-  const mediaTime = p && typeof p.mediaTime==='number' ? p.mediaTime : (t-(series[0]?.t||t));
   if(!isFinite(mediaTime) || mediaTime===''){
     status.textContent='この時刻には録画との対応情報がありません。録画中に記録された点をクリックしてください。';
     return;
   }
-  let rv=mediaRecordState.replayVideo;
-  if(!rv){
-    rv=document.createElement('video');
-    rv.muted=true; rv.playsInline=true; rv.preload='auto';
-    mediaRecordState.replayVideo=rv;
-  }
-  if(mediaRecordState.videoUrl) URL.revokeObjectURL(mediaRecordState.videoUrl);
-  mediaRecordState.videoUrl=URL.createObjectURL(mediaRecordState.videoBlob);
-  rv.src=mediaRecordState.videoUrl;
-  await new Promise(resolve=>{
-    rv.onloadedmetadata=resolve;
-    if(rv.readyState>=1) resolve();
-  });
-  rv.currentTime=Math.max(0,Math.min(rv.duration||mediaTime,mediaTime));
-  await new Promise(resolve=>{ rv.onseeked=resolve; setTimeout(resolve,900); });
-  if(rv.readyState<2){ try{ await rv.play(); rv.pause(); }catch{} }
-  vctx.drawImage(rv,0,0,view.width,view.height);
-  reviewingFrame=true;
-  status.textContent=`録画フレーム表示: ${mediaTime.toFixed(2)}秒`;
+  await playMediaAround(mediaTime);
+  status.textContent=`記録再生: ${mediaTime.toFixed(2)}秒から約3秒`;
 }
 
 
@@ -1936,6 +2022,8 @@ startBtn.onclick = async ()=>{
     await openCamera();
     running=true; paused=false;
     startBtn.disabled=true; pauseBtn.disabled=false; resetBtn.disabled=false; dlBtn.disabled=false;
+    saveVideoBtn.disabled=!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length);
+    saveAudioBtn.disabled=!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length);
     modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false; emoMethodSel.disabled=false;
     plotHeadChk.disabled=false; plotMouthChk.disabled=false; plotSpeechChk.disabled=false; plotVolumeChk.disabled=false;
     recordVideoChk.disabled=false; recordAudioChk.disabled=false;
@@ -1980,7 +2068,7 @@ pauseBtn.onclick = async ()=>{
   paused=!paused;
   pauseBtn.textContent = paused ? '▶ 再開' : '⏸ 一時停止';
   if(paused){
-    pauseMediaRecorders();
+    await pauseMediaRecorders();
     chartState.viewEnd = null;
     status.textContent='一時停止中：グラフをドラッグ/ホイールで過去へ移動、クリックで録画フレームを表示できます。';
     drawNiceChart();
@@ -2011,6 +2099,91 @@ dlBtn.onclick = ()=>{
   const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download='record.csv'; a.click(); URL.revokeObjectURL(url);
 };
+saveVideoBtn.onclick = async ()=>{
+  const shouldResume=running && !paused && recordVideoChk.checked && !!mediaRecordState.videoRecorder;
+  await stopVideoRecording();
+  const blob=combinedVideoBlob();
+  if(!blob){ alert('保存できる録画がありません'); return; }
+  downloadBlob(blob,'camera_record.webm');
+  if(shouldResume) await startVideoRecording();
+  status.textContent='録画ファイルを保存しました。';
+};
+saveAudioBtn.onclick = async ()=>{
+  const shouldResume=running && !paused && recordAudioChk.checked && !!mediaRecordState.audioRecorder;
+  await stopAudioRecording();
+  const blob=combinedAudioBlob();
+  if(!blob){ alert('保存できる録音がありません'); return; }
+  downloadBlob(blob,'audio_record.webm');
+  if(shouldResume) await startAudioRecording();
+  status.textContent='録音ファイルを保存しました。';
+};
+loadCsvBtn.onclick=()=>loadCsvInput.click();
+loadVideoBtn.onclick=()=>loadVideoInput.click();
+loadAudioBtn.onclick=()=>loadAudioInput.click();
+
+function parseCsvLine(line){
+  const out=[]; let cur='', q=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(ch==='"' && line[i+1]==='"'){ cur+='"'; i++; }
+    else if(ch==='"'){ q=!q; }
+    else if(ch===',' && !q){ out.push(cur); cur=''; }
+    else cur+=ch;
+  }
+  out.push(cur);
+  return out;
+}
+function numOrBlank(v){
+  const n=Number(v);
+  return v==='' || !isFinite(n) ? '' : n;
+}
+loadCsvInput.addEventListener('change', async e=>{
+  const file=e.target.files?.[0]; if(!file) return;
+  const text=await file.text();
+  const lines=text.trim().split(/\r?\n/).filter(Boolean);
+  if(lines.length<2){ alert('CSVに記録がありません'); return; }
+  const header=parseCsvLine(lines[0]);
+  const idx=Object.fromEntries(header.map((h,i)=>[h,i]));
+  records=[]; series=[];
+  for(const line of lines.slice(1)){
+    const c=parseCsvLine(line);
+    const r={
+      t:numOrBlank(c[idx.time]), mediaTime:numOrBlank(c[idx.media_time]), id:numOrBlank(c[idx.id]),
+      cls:c[idx.class]||'', x:numOrBlank(c[idx.x]), y:numOrBlank(c[idx.y]),
+      emotion:c[idx.emotion]||'', emotionScore:numOrBlank(c[idx.emotion_score]), emotionMethod:c[idx.emotion_method]||'',
+      yaw:numOrBlank(c[idx.yaw_deg]), pitch:numOrBlank(c[idx.pitch_deg]),
+      headHorizontal:c[idx.head_horizontal]||'', headVertical:c[idx.head_vertical]||'',
+      mouthOpen:numOrBlank(c[idx.mouth_open]), mouthRatio:numOrBlank(c[idx.mouth_ratio]),
+      speech:numOrBlank(c[idx.speech_on]), volumeDb:numOrBlank(c[idx.volume_db])
+    };
+    if(isFinite(r.t) && isFinite(r.x) && isFinite(r.y)){
+      records.push(r);
+      series.push({t:r.t,x:r.x,y:r.y,mediaTime:r.mediaTime,emotion:r.emotion,emotionScore:r.emotionScore,emotionMethod:r.emotionMethod,yaw:r.yaw,pitch:r.pitch,headHorizontal:r.headHorizontal,headVertical:r.headVertical,mouthOpen:r.mouthOpen,mouthRatio:r.mouthRatio,speech:r.speech,volumeDb:r.volumeDb});
+    }
+  }
+  paused=true; pauseBtn.disabled=false; pauseBtn.textContent='▶ 再開'; dlBtn.disabled=false; resetBtn.disabled=false;
+  chartState.viewEnd=null; reviewingFrame=true; drawNiceChart();
+  status.textContent=`CSVを読み込みました（${series.length}点）。録画/録音も読み込むと、グラフクリックで約3秒再生できます。`;
+  e.target.value='';
+});
+loadVideoInput.addEventListener('change', e=>{
+  const file=e.target.files?.[0]; if(!file) return;
+  mediaRecordState.videoBlob=file;
+  mediaRecordState.videoSegments=[];
+  if(mediaRecordState.videoUrl){ URL.revokeObjectURL(mediaRecordState.videoUrl); mediaRecordState.videoUrl=null; }
+  updateRecordBadges();
+  status.textContent='録画ファイルを読み込みました。停止中にグラフをクリックすると約3秒再生します。';
+  e.target.value='';
+});
+loadAudioInput.addEventListener('change', e=>{
+  const file=e.target.files?.[0]; if(!file) return;
+  mediaRecordState.audioBlob=file;
+  mediaRecordState.audioSegments=[];
+  if(mediaRecordState.audioUrl){ URL.revokeObjectURL(mediaRecordState.audioUrl); mediaRecordState.audioUrl=null; }
+  updateRecordBadges();
+  status.textContent='録音ファイルを読み込みました。停止中にグラフをクリックすると約3秒再生します。';
+  e.target.value='';
+});
 
 /* ===== ドラッグでテンプレ選択 ===== */
 function getXY(evt){

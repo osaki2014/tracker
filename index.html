@@ -110,7 +110,7 @@
 </script>
 
 <header>
-  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.4</span></div>
+  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.5</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -241,7 +241,7 @@
         <div><b>POSTER V2 / AffectNet-8</b>: Web由来の大規模な「in-the-wild」顔画像で学習した8分類モデルです。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を扱います。軽蔑（contempt）を含むため、EmotiEffLibの8分類と比較しやすい設定です。</div>
         <div><b>POSTER V2 / RAF-DB</b>: RAF-DBで学習した7分類モデルです。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を扱い、軽蔑（contempt）は含みません。比較的整った顔表情データセットで、POSTER V2の代表的な高精度ベンチマークとして使えます。</div>
         <div><b>EmotiEffLib</b>: EfficientNet/MobileNet系の軽量FER特徴抽出ライブラリ。<a href="https://arxiv.org/abs/2103.17107" target="_blank" rel="noreferrer">関連論文</a> / <a href="https://github.com/sb-ai-lab/EmotiEffLib" target="_blank" rel="noreferrer">EmotiEffLib GitHub</a></div>
-        <div>同階層に <code>poster_v2_affectnet8.onnx</code>、<code>poster_v2_rafdb.onnx</code>、<code>emotiefflib.onnx</code>（軽量版を作成した場合は <code>poster_v2_affectnet8_int8.onnx</code> / <code>poster_v2_rafdb_int8.onnx</code> を優先） を置くと、表情分析メニューから切り替えて推論できます。</div>
+        <div>同階層に <code>poster_v2_affectnet8_int8.onnx</code>、<code>poster_v2_rafdb_int8.onnx</code>、<code>emotiefflib.onnx</code> を置くと、表情分析メニューから切り替えて推論できます。</div>
       </div>
     </details>
     <details>
@@ -347,13 +347,13 @@ const EMOTION_CONFIGS = {
   },
   poster_affectnet8: {
     name: 'POSTER V2 / AffectNet-8',
-    paths: ['./poster_v2_affectnet8_int8.onnx','./poster_v2_affectnet8.onnx'],
+    paths: ['./poster_v2_affectnet8_int8.onnx', POSTER_RAW_BASE + 'poster_v2_affectnet8_int8.onnx'],
     labels: ['anger','contempt','disgust','fear','happy','neutral','sad','surprise'],
     dataset: 'AffectNet 8 cls'
   },
   poster_rafdb: {
     name: 'POSTER V2 / RAF-DB',
-    paths: ['./poster_v2_rafdb_int8.onnx','./poster_v2_rafdb.onnx'],
+    paths: ['./poster_v2_rafdb_int8.onnx', POSTER_RAW_BASE + 'poster_v2_rafdb_int8.onnx'],
     labels: ['surprise','fear','disgust','happy','sad','anger','neutral'],
     dataset: 'RAF-DB 7 cls'
   }
@@ -366,6 +366,9 @@ const EMOTION_COLORS = {
 const emoCanvas = document.createElement('canvas');
 emoCanvas.width = EMOTION_INPUT_SIZE; emoCanvas.height = EMOTION_INPUT_SIZE;
 const emoCtx = emoCanvas.getContext('2d', { willReadFrequently:true });
+const faceMeshCanvas = document.createElement('canvas');
+faceMeshCanvas.width = 320; faceMeshCanvas.height = 240;
+const faceMeshCtx = faceMeshCanvas.getContext('2d', { willReadFrequently:true });
 const emotionState = {
   sessions: {},
   promises: {},
@@ -375,7 +378,7 @@ const emotionState = {
 };
 const faceMetricsState = {
   mesh:null, ready:false, busy:false, last:null, lastTs:0, error:null,
-  pending:null, timeoutCount:0, disabled:false, nextTryTs:0
+  pending:null, timeoutCount:0, disabled:false, nextTryTs:0, generation:0
 };
 const audioState = {
   ctx:null, analyser:null, data:null, stream:null, last:null,
@@ -1194,17 +1197,26 @@ function describeEmotionLoadError(e){
   return msg;
 }
 
+function cacheBustUrl(path){
+  // GitHub Pages が古い404を返すことがあるため、ONNXだけキャッシュ回避する。
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}v=20260710_5`;
+}
 async function fetchOnnxBytes(path){
-  const res=await fetch(path,{cache:'no-store'});
-  if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  const url = cacheBustUrl(path);
+  const res=await fetch(url,{cache:'no-store'});
+  if(!res.ok) throw new Error(`fetch失敗: HTTP ${res.status} ${res.statusText} / ${path}`);
   const buf=await res.arrayBuffer();
   const bytes=new Uint8Array(buf);
-  const head=new TextDecoder('utf-8',{fatal:false}).decode(bytes.slice(0,120));
+  const head=new TextDecoder('utf-8',{fatal:false}).decode(bytes.slice(0,160));
+  if(bytes.byteLength < 1024*1024){
+    console.warn(`ONNXとしては小さすぎる可能性があります: ${path} / ${bytes.byteLength} bytes / head=${head.slice(0,80)}`);
+  }
   if(head.includes('git-lfs.github.com/spec')){
-    throw new Error('Git LFS pointer fileです。実体のONNXではありません。');
+    throw new Error(`Git LFS pointer fileです。実体のONNXではありません: ${path}`);
   }
   if(head.trim().startsWith('<!doctype') || head.trim().startsWith('<html') || head.includes('<html')){
-    throw new Error('ONNXではなくHTMLが返っています。ファイル名・配置・GitHub Pagesの配信を確認してください。');
+    throw new Error(`ONNXではなくHTMLが返っています: ${path}`);
   }
   return bytes;
 }
@@ -1212,26 +1224,33 @@ async function fetchOnnxBytes(path){
 async function createEmotionSessionFromPaths(method){
   const cfg=getEmotionConfig(method);
   const paths=emotionPathsFor(method);
-  let lastError=null;
+  const errors=[];
   for(const path of paths){
     try{
       status.textContent=`表情モデル読込中: ${cfg.name} / ${path}`;
       const bytes=await fetchOnnxBytes(path);
       const mb=(bytes.byteLength/1024/1024).toFixed(1);
-      if(bytes.byteLength>150*1024*1024 && !path.includes('_int8')){
-        console.warn(`${cfg.name} のONNXが大きいです: ${path} / ${mb}MB。ブラウザ環境では失敗する場合があります。`);
+      console.log(`${cfg.name} ONNX fetched: ${path} / ${bytes.byteLength} bytes`);
+      try{
+        const session=await ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
+        session.__emotionPath=path;
+        session.__emotionMethod=method;
+        status.textContent=`表情モデル読込完了: ${cfg.name} / ${path} / ${mb}MB`;
+        return session;
+      }catch(ortError){
+        const msg=String(ortError && (ortError.message || ortError.toString()) || ortError);
+        errors.push(`${path}: ORT読込失敗 ${msg}`);
+        console.error(`${cfg.name} のONNXは取得できましたが、ONNX Runtime Webで開けません: ${path} / ${mb}MB`, ortError);
+        // 取得済みONNXがORTで開けない場合、同名rawもほぼ同じ結果になるが、
+        // GitHub Pages側だけ壊れている可能性もあるため次候補を試す。
       }
-      const session=await ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
-      session.__emotionPath=path;
-      session.__emotionMethod=method;
-      status.textContent=`表情モデル読込完了: ${cfg.name} / ${path} / ${mb}MB`;
-      return session;
     }catch(e){
-      lastError=e;
-      console.warn(`${cfg.name} の読込に失敗: ${path} / ${describeEmotionLoadError(e)}`, e);
+      const msg=describeEmotionLoadError(e);
+      errors.push(`${path}: ${msg}`);
+      console.warn(`${cfg.name} の読込に失敗: ${path} / ${msg}`, e);
     }
   }
-  throw lastError || new Error(`${cfg?.name || method} のONNXファイルを読み込めません`);
+  throw new Error(errors.join(' / '));
 }
 
 async function ensureEmotionSession(method){
@@ -1373,6 +1392,16 @@ function faceDirectionFromLandmarks(lm){
     mouthOpen: mouthRatio>0.28 ? 1 : 0
   };
 }
+function resetFaceMesh(reason=''){
+  faceMetricsState.generation++;
+  try{ if(faceMetricsState.mesh && typeof faceMetricsState.mesh.close==='function') faceMetricsState.mesh.close(); }catch(e){}
+  faceMetricsState.mesh=null;
+  faceMetricsState.ready=false;
+  faceMetricsState.busy=false;
+  faceMetricsState.pending=null;
+  faceMetricsState.error=null;
+  if(reason) console.warn('FaceMeshをリセットしました:', reason);
+}
 async function ensureFaceMesh(){
   if(faceMetricsState.disabled) return null;
   if(faceMetricsState.mesh) return faceMetricsState.mesh;
@@ -1385,9 +1414,11 @@ async function ensureFaceMesh(){
   // バージョン固定URLを使う。これをしないと face_mesh.js と wasm/model 側の
   // 参照先がずれて、Console に dependency: fp/cp の警告が出たまま止まることがある。
   const mpBase='https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/';
+  const gen=faceMetricsState.generation;
   const mesh=new FaceMesh({locateFile:(file)=>`${mpBase}${file}`});
   mesh.setOptions({maxNumFaces:1,refineLandmarks:true,minDetectionConfidence:0.55,minTrackingConfidence:0.55});
   mesh.onResults((res)=>{
+    if(gen !== faceMetricsState.generation) return;
     const lm=res.multiFaceLandmarks && res.multiFaceLandmarks[0];
     const metrics=lm ? faceDirectionFromLandmarks(lm) : null;
     if(metrics){
@@ -1420,18 +1451,23 @@ async function analyzeFaceMetrics(){
   faceMetricsState.busy=true;
   const started=performance.now();
   faceMetricsState.pending = Promise.race([
-    mesh.send({image:vid}),
-    timeoutPromise(1200)
+    (async()=>{
+      // video要素を直接渡すより、低解像度canvasに描いて渡す方がブラウザ差が少ない。
+      faceMeshCtx.drawImage(vid,0,0,faceMeshCanvas.width,faceMeshCanvas.height);
+      return mesh.send({image:faceMeshCanvas});
+    })(),
+    timeoutPromise(900)
   ]).catch(e=>{
     faceMetricsState.busy=false;
     faceMetricsState.pending=null;
     faceMetricsState.timeoutCount++;
     if(faceMetricsState.timeoutCount<=2) console.warn('FaceMesh解析をスキップしました', e);
     if(faceMetricsState.timeoutCount>=2){
-      faceMetricsState.nextTryTs=performance.now()+10000;
-      status.textContent='顔向き/口解析の読み込みが遅いため一時スキップ中です。YOLOと表情推論は継続します。';
+      faceMetricsState.nextTryTs=performance.now()+15000;
+      resetFaceMesh(e && e.message ? e.message : e);
+      status.textContent='顔向き/口解析が不安定なため15秒スキップします。YOLOと表情推論は継続します。';
     }
-    if(faceMetricsState.timeoutCount>=4){
+    if(faceMetricsState.timeoutCount>=5){
       faceMetricsState.disabled=true;
       plotHeadChk.checked=false;
       plotMouthChk.checked=false;

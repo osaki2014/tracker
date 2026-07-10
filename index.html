@@ -110,7 +110,7 @@
 </script>
 
 <header>
-  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.3</span></div>
+  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.4</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -241,7 +241,7 @@
         <div><b>POSTER V2 / AffectNet-8</b>: Web由来の大規模な「in-the-wild」顔画像で学習した8分類モデルです。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を扱います。軽蔑（contempt）を含むため、EmotiEffLibの8分類と比較しやすい設定です。</div>
         <div><b>POSTER V2 / RAF-DB</b>: RAF-DBで学習した7分類モデルです。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を扱い、軽蔑（contempt）は含みません。比較的整った顔表情データセットで、POSTER V2の代表的な高精度ベンチマークとして使えます。</div>
         <div><b>EmotiEffLib</b>: EfficientNet/MobileNet系の軽量FER特徴抽出ライブラリ。<a href="https://arxiv.org/abs/2103.17107" target="_blank" rel="noreferrer">関連論文</a> / <a href="https://github.com/sb-ai-lab/EmotiEffLib" target="_blank" rel="noreferrer">EmotiEffLib GitHub</a></div>
-        <div>同階層に <code>poster_v2_affectnet8.onnx</code>、<code>poster_v2_rafdb.onnx</code>、<code>emotiefflib.onnx</code> を置くと、表情分析メニューから切り替えて推論できます。</div>
+        <div>同階層に <code>poster_v2_affectnet8.onnx</code>、<code>poster_v2_rafdb.onnx</code>、<code>emotiefflib.onnx</code>（軽量版を作成した場合は <code>poster_v2_affectnet8_int8.onnx</code> / <code>poster_v2_rafdb_int8.onnx</code> を優先） を置くと、表情分析メニューから切り替えて推論できます。</div>
       </div>
     </details>
     <details>
@@ -347,13 +347,13 @@ const EMOTION_CONFIGS = {
   },
   poster_affectnet8: {
     name: 'POSTER V2 / AffectNet-8',
-    paths: ['./poster_v2_affectnet8.onnx'],
+    paths: ['./poster_v2_affectnet8_int8.onnx','./poster_v2_affectnet8.onnx'],
     labels: ['anger','contempt','disgust','fear','happy','neutral','sad','surprise'],
     dataset: 'AffectNet 8 cls'
   },
   poster_rafdb: {
     name: 'POSTER V2 / RAF-DB',
-    paths: ['./poster_v2_rafdb.onnx'],
+    paths: ['./poster_v2_rafdb_int8.onnx','./poster_v2_rafdb.onnx'],
     labels: ['surprise','fear','disgust','happy','sad','anger','neutral'],
     dataset: 'RAF-DB 7 cls'
   }
@@ -1180,6 +1180,35 @@ function makeZeroTensorForInput(shape){
   return new ort.Tensor('float32', new Float32Array(n), dims);
 }
 
+function describeEmotionLoadError(e){
+  const msg=String((e && (e.message || e.toString())) || e || '不明なエラー');
+  if(/out of memory|memory|Cannot enlarge memory|allocation|Array buffer allocation/i.test(msg)){
+    return 'ブラウザのWASMメモリ不足の可能性があります。POSTER V2のONNXが大きすぎるため、軽量化版（*_int8.onnx）を作成して同じ階層に置いてください。';
+  }
+  if(/404|Not Found|Failed to fetch|NetworkError|fetch/i.test(msg)){
+    return 'ONNXファイルが見つからない、または配信に失敗しています。HTMLと同じ階層にファイル名を正確に置いてください。';
+  }
+  if(/protobuf|parse|invalid|model/i.test(msg)){
+    return 'ONNXとして読み込めない形式です。Git LFSのポインタファイルやHTMLエラーページを読んでいる可能性があります。';
+  }
+  return msg;
+}
+
+async function fetchOnnxBytes(path){
+  const res=await fetch(path,{cache:'no-store'});
+  if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  const buf=await res.arrayBuffer();
+  const bytes=new Uint8Array(buf);
+  const head=new TextDecoder('utf-8',{fatal:false}).decode(bytes.slice(0,120));
+  if(head.includes('git-lfs.github.com/spec')){
+    throw new Error('Git LFS pointer fileです。実体のONNXではありません。');
+  }
+  if(head.trim().startsWith('<!doctype') || head.trim().startsWith('<html') || head.includes('<html')){
+    throw new Error('ONNXではなくHTMLが返っています。ファイル名・配置・GitHub Pagesの配信を確認してください。');
+  }
+  return bytes;
+}
+
 async function createEmotionSessionFromPaths(method){
   const cfg=getEmotionConfig(method);
   const paths=emotionPathsFor(method);
@@ -1187,15 +1216,19 @@ async function createEmotionSessionFromPaths(method){
   for(const path of paths){
     try{
       status.textContent=`表情モデル読込中: ${cfg.name} / ${path}`;
-      // HEAD確認は使わない。GitHub PagesやローカルサーバでHEADが失敗しても、GETで読める場合があるため。
-      const session=await ort.InferenceSession.create(path,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
+      const bytes=await fetchOnnxBytes(path);
+      const mb=(bytes.byteLength/1024/1024).toFixed(1);
+      if(bytes.byteLength>150*1024*1024 && !path.includes('_int8')){
+        console.warn(`${cfg.name} のONNXが大きいです: ${path} / ${mb}MB。ブラウザ環境では失敗する場合があります。`);
+      }
+      const session=await ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
       session.__emotionPath=path;
       session.__emotionMethod=method;
-      status.textContent=`表情モデル読込完了: ${cfg.name}`;
+      status.textContent=`表情モデル読込完了: ${cfg.name} / ${path} / ${mb}MB`;
       return session;
     }catch(e){
       lastError=e;
-      console.warn(`${cfg.name} の読込に失敗: ${path}`, e);
+      console.warn(`${cfg.name} の読込に失敗: ${path} / ${describeEmotionLoadError(e)}`, e);
     }
   }
   throw lastError || new Error(`${cfg?.name || method} のONNXファイルを読み込めません`);
@@ -1206,8 +1239,8 @@ async function ensureEmotionSession(method){
   const cfg=getEmotionConfig(method);
   if(!cfg) return null;
   if(emotionState.sessions[method]) return emotionState.sessions[method];
-  // 一度失敗しても、ファイル配置後やキャッシュ更新後に選び直せるように、5秒後には再試行する。
-  if(emotionState.errors[method] && performance.now() < (emotionState.errors[method].retryAfter || 0)) return null;
+  // 一度失敗したモデルは、選び直すまで自動で何度も再読込しない。巨大ONNXでメモリを消費し続けるのを防ぐ。
+  if(emotionState.errors[method]) return null;
   if(emotionState.promises[method]) return emotionState.promises[method];
   emotionState.promises[method]=(async()=>{
     try{
@@ -1216,11 +1249,10 @@ async function ensureEmotionSession(method){
       delete emotionState.errors[method];
       return session;
     }catch(e){
-      e.retryAfter=performance.now()+5000;
       emotionState.errors[method]=e;
       const paths=emotionPathsFor(method).join(' / ');
       console.warn(`${cfg.name} の表情モデルを読み込めません。`, e);
-      status.textContent=`表情分析モデルを読み込めません: ${cfg.name} / ${paths} / ${e.message||e}`;
+      status.textContent=`表情分析モデルを読み込めません: ${cfg.name} / ${paths} / ${describeEmotionLoadError(e)}`;
       return null;
     }finally{
       emotionState.promises[method]=null;
@@ -1312,7 +1344,7 @@ async function analyzeEmotionForBox(box){
     e.retryAfter=performance.now()+5000;
     emotionState.errors[method]=e;
     console.warn('表情推論に失敗しました。', e);
-    status.textContent=`表情推論に失敗: ${(getEmotionConfig(method)||{}).name||method} / ${e.message||e}`;
+    status.textContent=`表情推論に失敗: ${(getEmotionConfig(method)||{}).name||method} / ${describeEmotionLoadError(e)}`;
     return (emotionState.last && emotionState.last.methodKey===method) ? emotionState.last : null;
   }
 }

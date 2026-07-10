@@ -91,6 +91,10 @@
     border-radius:22px;box-shadow:var(--shadow);width:calc(100vw - 24px);max-width:none;border:1px solid rgba(232,216,190,.78)
   }
   #status{width:calc(100vw - 24px);margin:0 auto 12px;color:var(--muted);font-size:14px;padding:0 10px}
+
+  .pinMenu{position:fixed;z-index:120;background:#fffdf8;border:1px solid var(--line);border-radius:14px;box-shadow:0 14px 38px rgba(0,0,0,.18);padding:6px;min-width:220px}
+  .pinMenu button{display:block;width:100%;text-align:left;margin:2px 0;padding:8px 10px;border-radius:10px;background:#fff;color:var(--ink);box-shadow:none;border:1px solid transparent}
+  .pinMenu button:hover{background:#f2fbf8;border-color:var(--pill-b);transform:none}
   @media (max-width:720px){
     #side{left:12px;right:12px;bottom:12px;width:auto;max-height:56%}
     #detectedBar{display:none}
@@ -110,7 +114,7 @@
 </script>
 
 <header>
-  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.7</span></div>
+  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.8</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -414,6 +418,7 @@ const playState = {
   timer:null,
   currentAudio:null
 };
+const pinState = { pins:[], nextId:1, menu:null };
 let reviewingFrame=false;
 /* ▼▼ スライダ値（いつでも変更可能） */
 const P = {
@@ -810,10 +815,24 @@ window.addEventListener('pointerup', async e=>{
   }
 });
 chart.addEventListener('click', async e=>{
+  closePinMenu();
   if(playState.suppressClick) return;
+  const pin=findPinAtEvent(e);
+  if(pin){ await playSelectionAtChartTime(pin.start,pin.duration); return; }
   const t=timeAtChartEvent(e);
   if(t!=null) await playSelectionAtChartTime(t, playState.duration || 1.0);
 });
+chart.addEventListener('contextmenu', e=>{
+  e.preventDefault();
+  const pin=findPinAtEvent(e);
+  if(pin){ showPinMenu(pin,e.clientX,e.clientY); return; }
+  const t=timeAtChartEvent(e);
+  if(t!=null){
+    const p=addPinAt(t,pinDurationDefault());
+    showPinMenu(p,e.clientX,e.clientY);
+  }
+});
+document.addEventListener('click', e=>{ if(pinState.menu && !pinState.menu.contains(e.target)) closePinMenu(); });
 
 /* ===== FPS（映像） ===== */
 function meterVideo(){
@@ -1046,6 +1065,7 @@ function drawNiceChart(){
   cctx.fillText('時刻', w/2-16, h-8);
   cctx.save(); cctx.translate(18, h/2+24); cctx.rotate(-Math.PI/2); cctx.fillText('画素座標 (x=青 / y=黄)', 0, 0); cctx.restore();
   drawPlaybackWindow();
+  drawPinsOnChart();
 
   if(series.length>=2){
     const recent=seriesForVisibleRange(series,tMin,tMax);
@@ -1279,7 +1299,13 @@ async function ensureEmotionSession(method){
       const paths=emotionPathsFor(method).join(' / ');
       const readable=describeEmotionLoadError(e);
       if(cfg.fallback){
-        status.textContent=`${cfg.name}はブラウザ側ONNX Runtimeで開けないため、${getEmotionConfig(cfg.fallback).name}で代替します。`;
+        const fb=getEmotionConfig(cfg.fallback);
+        status.textContent=`${cfg.name}はブラウザ側ONNX Runtimeで開けないため、${fb.name}に自動切替しました。`;
+        if(emoMethodSel.value===method){
+          emoMethodSel.value=cfg.fallback;
+          emotionState.last=null;
+          emotionState.lastTs=0;
+        }
         console.info(`${cfg.name} unavailable; falling back to ${cfg.fallback}`, {paths, message: readable});
         return await ensureEmotionSession(cfg.fallback);
       }
@@ -1683,6 +1709,170 @@ async function resetRecordings(){
   mediaRecordState.audioStartPerf=0;
   updateRecordBadges();
 }
+
+function closePinMenu(){
+  if(pinState.menu){ pinState.menu.remove(); pinState.menu=null; }
+}
+function pinDurationDefault(){
+  return Math.max(0.2, playState.duration || 3.0);
+}
+function addPinAt(t, duration=pinDurationDefault()){
+  const pin={id:pinState.nextId++, start:t, duration:Math.max(0.2,duration||1.0), label:`Pin ${pinState.nextId-1}`};
+  pinState.pins.push(pin);
+  playState.chartStart=pin.start;
+  playState.duration=pin.duration;
+  drawNiceChart();
+  status.textContent=`ピンを追加: ${formatAxisTime(pin.start)} から ${pin.duration.toFixed(1)}秒`;
+  return pin;
+}
+function removePin(pin){
+  pinState.pins=pinState.pins.filter(p=>p.id!==pin.id);
+  closePinMenu();
+  drawNiceChart();
+  status.textContent=`ピンを解除しました。`;
+}
+function findPinAtEvent(e){
+  const r=chartState.render; if(!r || !pinState.pins.length) return null;
+  const rect=chart.getBoundingClientRect();
+  const x=(e.clientX-rect.left)*(chart.width/rect.width);
+  const y=(e.clientY-rect.top)*(chart.height/rect.height);
+  if(y<r.T-16 || y>r.h-r.B+24) return null;
+  let best=null, bestD=Infinity;
+  for(const p of pinState.pins){
+    const px=chartXForTime(p.start,r);
+    if(px==null) continue;
+    const d=Math.abs(px-x);
+    if(d<bestD){ best=p; bestD=d; }
+  }
+  return bestD<=10 ? best : null;
+}
+function drawPinsOnChart(){
+  const r=chartState.render; if(!r || !pinState.pins.length) return;
+  cctx.save();
+  cctx.beginPath(); cctx.rect(r.L,r.T,r.w-r.L-r.R,r.h-r.T-r.B); cctx.clip();
+  for(const p of pinState.pins){
+    if(p.start+p.duration<r.tMin || p.start>r.tMax) continue;
+    const x1=chartXForTime(p.start,r);
+    const x2=chartXForTime(p.start+p.duration,r);
+    const x2c=Math.max(r.L,Math.min(r.w-r.R,x2));
+    cctx.fillStyle='rgba(239,143,143,.16)';
+    cctx.fillRect(x1,r.T,Math.max(2,x2c-x1),r.h-r.T-r.B);
+    cctx.strokeStyle='#d44'; cctx.lineWidth=2;
+    cctx.beginPath(); cctx.moveTo(x1,r.T); cctx.lineTo(x1,r.h-r.B); cctx.stroke();
+    cctx.fillStyle='#d44';
+    cctx.beginPath(); cctx.moveTo(x1,r.T-2); cctx.lineTo(x1-6,r.T-12); cctx.lineTo(x1+6,r.T-12); cctx.closePath(); cctx.fill();
+    cctx.font='12px -apple-system,system-ui';
+    cctx.fillText(`${p.label} ${p.duration.toFixed(1)}s`, Math.min(x1+6,r.w-r.R-80), r.T+14);
+  }
+  cctx.restore();
+}
+function csvRowsForRange(chartStart,duration){
+  const end=chartStart+duration;
+  return records.filter(r=>r.t>=chartStart && r.t<=end);
+}
+function csvTextForRows(rows){
+  let csv='time,datetime,date,clock,media_time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db\n';
+  rows.forEach(r=>{
+    const dt=r.datetime ? {datetime:r.datetime,date:r.date||'',clock:r.clock||''} : dateFieldsFromT(r.t);
+    const score = typeof r.emotionScore==='number' ? r.emotionScore.toFixed(4) : (r.emotionScore||'');
+    const yaw = typeof r.yaw==='number' ? r.yaw.toFixed(2) : (r.yaw||'');
+    const pitch = typeof r.pitch==='number' ? r.pitch.toFixed(2) : (r.pitch||'');
+    const mouth = typeof r.mouthRatio==='number' ? r.mouthRatio.toFixed(4) : (r.mouthRatio||'');
+    const vol = typeof r.volumeDb==='number' ? r.volumeDb.toFixed(2) : (r.volumeDb||'');
+    const mediaTime = typeof r.mediaTime==='number' ? r.mediaTime.toFixed(2) : (r.mediaTime||'');
+    csv+=`${Number(r.t).toFixed(2)},${dt.datetime},${dt.date},${dt.clock},${mediaTime},${r.id},${r.cls},${Number(r.x).toFixed(1)},${Number(r.y).toFixed(1)},${r.emotion||''},${score},${r.emotionMethod||''},${yaw},${pitch},${r.headHorizontal||''},${r.headVertical||''},${r.mouthOpen ?? ''},${mouth},${r.speech ?? ''},${vol}\n`;
+  });
+  return csv;
+}
+function exportPinCsv(pin){
+  const rows=csvRowsForRange(pin.start,pin.duration);
+  if(!rows.length){ alert('このピン範囲にCSVデータがありません。'); return; }
+  downloadBlob(new Blob([csvTextForRows(rows)],{type:'text/csv'}),`pin_${pin.id}_${formatAxisTime(pin.start).replaceAll(':','')}.csv`);
+}
+async function recordVideoClipFromPin(pin){
+  const p=nearestSeriesAt(pin.start);
+  const mediaTime = p && typeof p.mediaTime==='number' ? p.mediaTime : (pin.start-(series[0]?.t||pin.start));
+  const videoSeg=segmentForTime(mediaRecordState.videoSegments, mediaTime);
+  const videoBlob=videoSeg?.blob || (!mediaRecordState.videoSegments.length ? mediaRecordState.videoBlob : null);
+  if(!videoBlob){ alert('切り出せる録画がありません。先にカメラ録画を保存/読み込みしてください。'); return; }
+  const videoOffset=videoSeg ? Math.max(0,mediaTime-videoSeg.start) : mediaTime;
+  const rv=document.createElement('video');
+  rv.muted=true; rv.playsInline=true; rv.preload='auto';
+  const url=URL.createObjectURL(videoBlob); rv.src=url;
+  await new Promise(resolve=>{ rv.onloadedmetadata=resolve; if(rv.readyState>=1) resolve(); });
+  rv.currentTime=Math.max(0,Math.min(rv.duration||videoOffset,videoOffset));
+  await new Promise(resolve=>{ rv.onseeked=resolve; setTimeout(resolve,900); });
+  const cw=640, ch=Math.max(1,Math.round(cw*(rv.videoHeight||360)/(rv.videoWidth||640)));
+  const cv=document.createElement('canvas'); cv.width=cw; cv.height=ch;
+  const cx=cv.getContext('2d');
+  const stream=cv.captureStream(30);
+  const mime=bestMime(['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']);
+  const rec=new MediaRecorder(stream,mime?{mimeType:mime}:{});
+  const chunks=[]; rec.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  await new Promise(async resolve=>{
+    rec.onstop=resolve; rec.start(250);
+    const endAt=performance.now()+pin.duration*1000;
+    const draw=()=>{
+      try{ cx.drawImage(rv,0,0,cw,ch); }catch{}
+      if(performance.now()<endAt && !rv.ended) requestAnimationFrame(draw);
+      else { try{rv.pause();}catch{}; if(rec.state!=='inactive') rec.stop(); }
+    };
+    try{ await rv.play(); }catch{}
+    draw();
+  });
+  URL.revokeObjectURL(url);
+  if(chunks.length) downloadBlob(new Blob(chunks,{type:mime||'video/webm'}),`pin_${pin.id}_video.webm`);
+}
+async function recordAudioClipFromPin(pin){
+  const p=nearestSeriesAt(pin.start);
+  const mediaTime = p && typeof p.mediaTime==='number' ? p.mediaTime : (pin.start-(series[0]?.t||pin.start));
+  const audioSeg=segmentForTime(mediaRecordState.audioSegments, mediaTime);
+  const audioBlob=audioSeg?.blob || (!mediaRecordState.audioSegments.length ? mediaRecordState.audioBlob : null);
+  if(!audioBlob){ alert('切り出せる音声がありません。先に音声録音を保存/読み込みしてください。'); return; }
+  const audioOffset=audioSeg ? Math.max(0,mediaTime-audioSeg.start) : mediaTime;
+  const au=new Audio(URL.createObjectURL(audioBlob)); au.preload='auto';
+  await new Promise(resolve=>{ au.onloadedmetadata=resolve; if(au.readyState>=1) resolve(); });
+  au.currentTime=Math.max(0,Math.min(au.duration||audioOffset,audioOffset));
+  const ac=new (window.AudioContext||window.webkitAudioContext)();
+  const src=ac.createMediaElementSource(au);
+  const dest=ac.createMediaStreamDestination(); src.connect(dest); src.connect(ac.destination);
+  const mime=bestMime(['audio/webm;codecs=opus','audio/webm']);
+  const rec=new MediaRecorder(dest.stream,mime?{mimeType:mime}:{});
+  const chunks=[]; rec.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  await ac.resume();
+  await new Promise(async resolve=>{
+    rec.onstop=resolve; rec.start(250);
+    try{ await au.play(); }catch{}
+    setTimeout(()=>{ try{au.pause();}catch{}; if(rec.state!=='inactive') rec.stop(); }, pin.duration*1000);
+  });
+  try{ await ac.close(); }catch{}
+  if(chunks.length) downloadBlob(new Blob(chunks,{type:mime||'audio/webm'}),`pin_${pin.id}_audio.webm`);
+}
+function showPinMenu(pin,clientX,clientY){
+  closePinMenu();
+  const menu=document.createElement('div'); menu.className='pinMenu';
+  menu.innerHTML=`
+    <button data-act="play">▶ この範囲を再生</button>
+    <button data-act="csv">📄 この範囲のCSV保存</button>
+    <button data-act="video">🎞 この範囲の動画保存</button>
+    <button data-act="audio">🔊 この範囲の音声保存</button>
+    <button data-act="remove">🗑 ピン解除</button>`;
+  document.body.appendChild(menu);
+  const rect=menu.getBoundingClientRect();
+  menu.style.left=Math.min(clientX,window.innerWidth-rect.width-8)+'px';
+  menu.style.top=Math.min(clientY,window.innerHeight-rect.height-8)+'px';
+  menu.addEventListener('click',async e=>{
+    const act=e.target?.dataset?.act; if(!act) return;
+    closePinMenu();
+    if(act==='play') await playSelectionAtChartTime(pin.start,pin.duration);
+    if(act==='csv') exportPinCsv(pin);
+    if(act==='video') await recordVideoClipFromPin(pin);
+    if(act==='audio') await recordAudioClipFromPin(pin);
+    if(act==='remove') removePin(pin);
+  });
+  pinState.menu=menu;
+}
+
 function timeAtChartEvent(e){
   const r=chartState.render; if(!r) return null;
   const rect=chart.getBoundingClientRect();

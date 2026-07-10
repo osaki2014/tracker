@@ -114,7 +114,7 @@
 </script>
 
 <header>
-  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.8</span></div>
+  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.9</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -827,10 +827,9 @@ chart.addEventListener('contextmenu', e=>{
   const pin=findPinAtEvent(e);
   if(pin){ showPinMenu(pin,e.clientX,e.clientY); return; }
   const t=timeAtChartEvent(e);
-  if(t!=null){
-    const p=addPinAt(t,pinDurationDefault());
-    showPinMenu(p,e.clientX,e.clientY);
-  }
+  if(t==null) return;
+  const range=currentPlaybackRangeAt(t);
+  showRangeMenu(range,e.clientX,e.clientY);
 });
 document.addEventListener('click', e=>{ if(pinState.menu && !pinState.menu.contains(e.target)) closePinMenu(); });
 
@@ -1236,6 +1235,9 @@ async function fetchOnnxBytes(path){
   const head=new TextDecoder('utf-8',{fatal:false}).decode(bytes.slice(0,160));
   if(bytes.byteLength < 1024*1024){
     console.debug(`ONNX size check: ${path} / ${bytes.byteLength} bytes / head=${head.slice(0,80)}`);
+  }
+  if(path.includes('poster_v2') && bytes.byteLength < 5*1024*1024){
+    throw new Error(`POSTER V2 ONNXとしては小さすぎます（${bytes.byteLength} bytes）。変換時に重みが入っていない/壊れている可能性があります。再エクスポートしてください: ${path}`);
   }
   if(head.includes('git-lfs.github.com/spec')){
     throw new Error(`Git LFS pointer fileです。実体のONNXではありません: ${path}`);
@@ -1710,6 +1712,23 @@ async function resetRecordings(){
   updateRecordBadges();
 }
 
+
+function currentPlaybackRangeAt(t){
+  const dur=Math.max(0.2, playState.duration || 3.0);
+  let start=(playState.chartStart!=null) ? playState.chartStart : t;
+  if(playState.chartStart!=null){
+    const end=playState.chartStart+dur;
+    if(t < playState.chartStart || t > end){
+      // 再生範囲外を右クリックした場合は、その位置から既定秒数の一時範囲として扱う。
+      start=t;
+    }
+  }
+  playState.chartStart=start;
+  playState.duration=dur;
+  drawNiceChart();
+  return {id:'range', start, duration:dur, label:'選択範囲'};
+}
+
 function closePinMenu(){
   if(pinState.menu){ pinState.menu.remove(); pinState.menu=null; }
 }
@@ -1787,7 +1806,7 @@ function csvTextForRows(rows){
 function exportPinCsv(pin){
   const rows=csvRowsForRange(pin.start,pin.duration);
   if(!rows.length){ alert('このピン範囲にCSVデータがありません。'); return; }
-  downloadBlob(new Blob([csvTextForRows(rows)],{type:'text/csv'}),`pin_${pin.id}_${formatAxisTime(pin.start).replaceAll(':','')}.csv`);
+  downloadBlob(new Blob([csvTextForRows(rows)],{type:'text/csv'}),`${pin.id==='range'?'range':'pin_'+pin.id}_${formatAxisTime(pin.start).replaceAll(':','')}.csv`);
 }
 async function recordVideoClipFromPin(pin){
   const p=nearestSeriesAt(pin.start);
@@ -1821,7 +1840,7 @@ async function recordVideoClipFromPin(pin){
     draw();
   });
   URL.revokeObjectURL(url);
-  if(chunks.length) downloadBlob(new Blob(chunks,{type:mime||'video/webm'}),`pin_${pin.id}_video.webm`);
+  if(chunks.length) downloadBlob(new Blob(chunks,{type:mime||'video/webm'}),`${pin.id==='range'?'range':'pin_'+pin.id}_video.webm`);
 }
 async function recordAudioClipFromPin(pin){
   const p=nearestSeriesAt(pin.start);
@@ -1846,8 +1865,34 @@ async function recordAudioClipFromPin(pin){
     setTimeout(()=>{ try{au.pause();}catch{}; if(rec.state!=='inactive') rec.stop(); }, pin.duration*1000);
   });
   try{ await ac.close(); }catch{}
-  if(chunks.length) downloadBlob(new Blob(chunks,{type:mime||'audio/webm'}),`pin_${pin.id}_audio.webm`);
+  if(chunks.length) downloadBlob(new Blob(chunks,{type:mime||'audio/webm'}),`${pin.id==='range'?'range':'pin_'+pin.id}_audio.webm`);
 }
+
+function showRangeMenu(range,clientX,clientY){
+  closePinMenu();
+  const menu=document.createElement('div'); menu.className='pinMenu';
+  menu.innerHTML=`
+    <button data-act="play">▶ この範囲を再生</button>
+    <button data-act="pin">📍 この範囲にピンを設置</button>
+    <button data-act="csv">📄 この範囲のCSV保存</button>
+    <button data-act="video">🎞 この範囲の動画保存</button>
+    <button data-act="audio">🔊 この範囲の音声保存</button>`;
+  document.body.appendChild(menu);
+  const rect=menu.getBoundingClientRect();
+  menu.style.left=Math.min(clientX,window.innerWidth-rect.width-8)+'px';
+  menu.style.top=Math.min(clientY,window.innerHeight-rect.height-8)+'px';
+  menu.addEventListener('click',async e=>{
+    const act=e.target?.dataset?.act; if(!act) return;
+    closePinMenu();
+    if(act==='play') await playSelectionAtChartTime(range.start,range.duration);
+    if(act==='pin') addPinAt(range.start,range.duration);
+    if(act==='csv') exportPinCsv(range);
+    if(act==='video') await recordVideoClipFromPin(range);
+    if(act==='audio') await recordAudioClipFromPin(range);
+  });
+  pinState.menu=menu;
+}
+
 function showPinMenu(pin,clientX,clientY){
   closePinMenu();
   const menu=document.createElement('div'); menu.className='pinMenu';

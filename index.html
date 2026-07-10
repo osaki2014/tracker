@@ -110,7 +110,7 @@
 </script>
 
 <header>
-  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.5</span></div>
+  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.6</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -338,6 +338,9 @@ const tplCtx   = tplThumb.getContext('2d');
 
 /* ===== 表情分析（顔ROI → FER ONNX） ===== */
 const EMOTION_INPUT_SIZE = 224;
+// この定数が未定義だとページ全体のJavaScriptが停止し、カメラ起動も動かなくなります。
+// GitHub Pages でONNXが404になる場合に備え、公開リポジトリのraw URLも試します。
+const POSTER_RAW_BASE = 'https://raw.githubusercontent.com/osaki2014/tracker/main/';
 const EMOTION_CONFIGS = {
   emotiefflib: {
     name: 'EmotiEffLib',

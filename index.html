@@ -110,7 +110,7 @@
 </script>
 
 <header>
-  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.6</span></div>
+  <div class="appTitle">表情リフレクション記録 <span class="ver">v2026.07.10.7</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -160,8 +160,8 @@
       <option value="off">OFF</option>
     </select>
   </label>
-  <label><input type="checkbox" id="plotHead" disabled checked> 顔向き<button type="button" class="helpBtn" data-help="head" aria-label="顔向きの説明">?</button></label>
-  <label><input type="checkbox" id="plotMouth" disabled checked> 口の開き<button type="button" class="helpBtn" data-help="mouth" aria-label="口の開きの説明">?</button></label>
+  <label><input type="checkbox" id="plotHead" disabled> 顔向き<button type="button" class="helpBtn" data-help="head" aria-label="顔向きの説明">?</button></label>
+  <label><input type="checkbox" id="plotMouth" disabled> 口の開き<button type="button" class="helpBtn" data-help="mouth" aria-label="口の開きの説明">?</button></label>
   <label><input type="checkbox" id="plotSpeech" disabled> 発話ON/OFF<button type="button" class="helpBtn" data-help="speech" aria-label="発話判定の説明">?</button></label>
   <label><input type="checkbox" id="plotVolume" disabled> 音量<button type="button" class="helpBtn" data-help="audio" aria-label="音量の説明">?</button></label>
   <label><input type="checkbox" id="recordVideo" disabled> カメラ録画 <span id="videoRecInfo" class="recInfo">未記録</span></label>
@@ -255,7 +255,7 @@
     <details>
       <summary>👀 顔向き・口・発話の根拠</summary>
       <div class="meta">
-        <div>顔向きと口の開きは MediaPipe Face Mesh の468点3D顔ランドマークを使います。口は唇ランドマークの Mouth Aspect Ratio（MAR）で推定します。</div>
+        <div>顔向きと口の開きは MediaPipe Face Mesh の468点3D顔ランドマークを使います。初期状態ではOFFにし、必要な時だけONにすることでFaceMesh由来の警告を減らしています。口は唇ランドマークの Mouth Aspect Ratio（MAR）で推定します。</div>
         <div>発話ON/OFFはマイク音声の短時間RMS/dBと適応ノイズ床による軽量VADです。</div>
         <div>参考: <a href="https://arxiv.org/abs/1906.08172" target="_blank" rel="noreferrer">MediaPipe</a>、<a href="https://github.com/google-ai-edge/mediapipe" target="_blank" rel="noreferrer">MediaPipe GitHub</a>、<a href="https://github.com/wiseman/py-webrtcvad" target="_blank" rel="noreferrer">WebRTC VAD実装例</a>、<a href="https://arxiv.org/abs/1903.02844" target="_blank" rel="noreferrer">robust VAD study</a></div>
       </div>
@@ -352,13 +352,15 @@ const EMOTION_CONFIGS = {
     name: 'POSTER V2 / AffectNet-8',
     paths: ['./poster_v2_affectnet8_int8.onnx', POSTER_RAW_BASE + 'poster_v2_affectnet8_int8.onnx'],
     labels: ['anger','contempt','disgust','fear','happy','neutral','sad','surprise'],
-    dataset: 'AffectNet 8 cls'
+    dataset: 'AffectNet 8 cls',
+    fallback: 'emotiefflib'
   },
   poster_rafdb: {
     name: 'POSTER V2 / RAF-DB',
     paths: ['./poster_v2_rafdb_int8.onnx', POSTER_RAW_BASE + 'poster_v2_rafdb_int8.onnx'],
     labels: ['surprise','fear','disgust','happy','sad','anger','neutral'],
-    dataset: 'RAF-DB 7 cls'
+    dataset: 'RAF-DB 7 cls',
+    fallback: 'emotiefflib'
   }
 };
 const EMOTION_COLORS = {
@@ -480,8 +482,8 @@ const HELP_TEXT = {
     body:`<p><b>顔の写真から表情カテゴリを推定する機能</b>です。まずYOLOで顔を見つけ、その顔だけを切り出して、各表情カテゴリの確率を計算します。</p>
     <ul>
       <li><b>EmotiEffLib</b>: 軽量で動作確認しやすい8分類モデルです。リアルタイム処理やプロトタイプに向いています。</li>
-      <li><b>POSTER V2 / AffectNet-8</b>: Web由来の大規模なin-the-wild顔画像データで学習した8分類モデルです。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を出します。</li>
-      <li><b>POSTER V2 / RAF-DB</b>: RAF-DBで学習した7分類モデルです。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を出し、<code>contempt</code> は含みません。</li>
+      <li><b>POSTER V2 / AffectNet-8</b>: Web由来の大規模なin-the-wild顔画像データで学習した8分類モデルです。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を出します。ブラウザ版ONNX Runtimeで開けない場合は自動的にEmotiEffLibで代替します。</li>
+      <li><b>POSTER V2 / RAF-DB</b>: RAF-DBで学習した7分類モデルです。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を出し、<code>contempt</code> は含みません。ブラウザ版ONNX Runtimeで開けない場合は自動的にEmotiEffLibで代替します。</li>
     </ul>
     <p>同じ動画でも、AffectNet-8は多様な日常画像に強い一方、RAF-DBは7基本表情のベンチマーク精度比較に向きます。保育場面では「感情の断定」ではなく、モデル間で一致する傾向や時間変化をリフレクション材料として扱ってください。</p>
     <p>参考: <a href="https://arxiv.org/abs/2204.04083" target="_blank" rel="noreferrer">POSTER</a> / <a href="https://arxiv.org/abs/2301.12149" target="_blank" rel="noreferrer">POSTER++</a> / <a href="https://github.com/sb-ai-lab/EmotiEffLib" target="_blank" rel="noreferrer">EmotiEffLib GitHub</a></p>`
@@ -589,9 +591,9 @@ async function openCamera(){
   if(!camStream) throw lastError || new Error('No camera stream');
 
   const track = camStream.getVideoTracks()[0];
-  track.onended = ()=>{ console.warn('camera track ended → restart'); restartCamera(); };
+  track.onended = ()=>{ console.info('camera track ended → restart'); restartCamera(); };
   // 一時的なmuteで再許可要求を繰り返さない。
-  track.onmute  = ()=>{ console.warn('camera muted'); };
+  track.onmute  = ()=>{ console.info('camera muted'); };
   track.onunmute= ()=>{ console.log('camera unmuted'); };
 
   vid.srcObject = camStream;
@@ -602,7 +604,7 @@ async function openCamera(){
   camWatch = setInterval(()=>{
     const stalled = (vid.readyState < 2) || (vid.currentTime === lastVideoTime);
     if(stalled){
-      console.warn('camera stalled → restart');
+      console.info('camera stalled → restart');
       restartCamera();
     }
     lastVideoTime = vid.currentTime;
@@ -617,7 +619,7 @@ function stopCamera(){
       camStream.getTracks().forEach(t=>t.stop());
       camStream=null;
     }
-  }catch(e){ console.warn('stopCamera warn:', e); }
+  }catch(e){ console.info('stopCamera:', e); }
 }
 async function stopApp(){
   paused=true;
@@ -640,7 +642,7 @@ async function stopApp(){
 async function restartCamera(){
   stopCamera();
   try{ await openCamera(); }
-  catch(e){ console.error('restartCamera failed:', e); status.textContent = cameraErrorMessage(e); }
+  catch(e){ console.info('restartCamera failed:', e); status.textContent = cameraErrorMessage(e); }
 }
 /* タブ切替での安全化 */
 document.addEventListener('visibilitychange', async ()=>{
@@ -1161,7 +1163,7 @@ async function ensureCoco26Session(){
       return coco26Session;
     }catch(e){
       coco26LoadError=e;
-      console.error('YOLO26モデルを読み込めません。GitHub Pagesへyolo26n.onnxをアップロードしてください。',e);
+      console.info('YOLO26モデルを読み込めません。GitHub Pagesへyolo26n.onnxをアップロードしてください。',e);
       return null;
     }finally{
       coco26LoadPromise=null;
@@ -1213,7 +1215,7 @@ async function fetchOnnxBytes(path){
   const bytes=new Uint8Array(buf);
   const head=new TextDecoder('utf-8',{fatal:false}).decode(bytes.slice(0,160));
   if(bytes.byteLength < 1024*1024){
-    console.warn(`ONNXとしては小さすぎる可能性があります: ${path} / ${bytes.byteLength} bytes / head=${head.slice(0,80)}`);
+    console.debug(`ONNX size check: ${path} / ${bytes.byteLength} bytes / head=${head.slice(0,80)}`);
   }
   if(head.includes('git-lfs.github.com/spec')){
     throw new Error(`Git LFS pointer fileです。実体のONNXではありません: ${path}`);
@@ -1233,7 +1235,7 @@ async function createEmotionSessionFromPaths(method){
       status.textContent=`表情モデル読込中: ${cfg.name} / ${path}`;
       const bytes=await fetchOnnxBytes(path);
       const mb=(bytes.byteLength/1024/1024).toFixed(1);
-      console.log(`${cfg.name} ONNX fetched: ${path} / ${bytes.byteLength} bytes`);
+      console.info(`${cfg.name} ONNX fetched: ${path} / ${bytes.byteLength} bytes`);
       try{
         const session=await ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
         session.__emotionPath=path;
@@ -1241,16 +1243,15 @@ async function createEmotionSessionFromPaths(method){
         status.textContent=`表情モデル読込完了: ${cfg.name} / ${path} / ${mb}MB`;
         return session;
       }catch(ortError){
-        const msg=String(ortError && (ortError.message || ortError.toString()) || ortError);
+        const msg=String(ortError && (ortError.message || ortError.toString()) || ortError || 'ORT読込失敗');
         errors.push(`${path}: ORT読込失敗 ${msg}`);
-        console.error(`${cfg.name} のONNXは取得できましたが、ONNX Runtime Webで開けません: ${path} / ${mb}MB`, ortError);
-        // 取得済みONNXがORTで開けない場合、同名rawもほぼ同じ結果になるが、
-        // GitHub Pages側だけ壊れている可能性もあるため次候補を試す。
+        // Consoleをエラーで埋めない。詳細はstatusに出し、必要時のみdebugで確認する。
+        console.debug(`${cfg.name} ONNX Runtime open failed`, {path, mb, ortError});
       }
     }catch(e){
       const msg=describeEmotionLoadError(e);
       errors.push(`${path}: ${msg}`);
-      console.warn(`${cfg.name} の読込に失敗: ${path} / ${msg}`, e);
+      console.debug(`${cfg.name} load failed`, {path, message:msg, error:e});
     }
   }
   throw new Error(errors.join(' / '));
@@ -1262,7 +1263,10 @@ async function ensureEmotionSession(method){
   if(!cfg) return null;
   if(emotionState.sessions[method]) return emotionState.sessions[method];
   // 一度失敗したモデルは、選び直すまで自動で何度も再読込しない。巨大ONNXでメモリを消費し続けるのを防ぐ。
-  if(emotionState.errors[method]) return null;
+  if(emotionState.errors[method]){
+    if(cfg.fallback) return await ensureEmotionSession(cfg.fallback);
+    return null;
+  }
   if(emotionState.promises[method]) return emotionState.promises[method];
   emotionState.promises[method]=(async()=>{
     try{
@@ -1273,8 +1277,14 @@ async function ensureEmotionSession(method){
     }catch(e){
       emotionState.errors[method]=e;
       const paths=emotionPathsFor(method).join(' / ');
-      console.warn(`${cfg.name} の表情モデルを読み込めません。`, e);
-      status.textContent=`表情分析モデルを読み込めません: ${cfg.name} / ${paths} / ${describeEmotionLoadError(e)}`;
+      const readable=describeEmotionLoadError(e);
+      if(cfg.fallback){
+        status.textContent=`${cfg.name}はブラウザ側ONNX Runtimeで開けないため、${getEmotionConfig(cfg.fallback).name}で代替します。`;
+        console.info(`${cfg.name} unavailable; falling back to ${cfg.fallback}`, {paths, message: readable});
+        return await ensureEmotionSession(cfg.fallback);
+      }
+      status.textContent=`表情分析モデルを読み込めません: ${cfg.name} / ${paths} / ${readable}`;
+      console.info(`${cfg.name} unavailable`, {paths, message: readable});
       return null;
     }finally{
       emotionState.promises[method]=null;
@@ -1356,8 +1366,10 @@ async function analyzeEmotionForBox(box){
       }
     }
     const out=await session.run(feeds);
-    const emotion=outputToEmotion(out, method);
+    const actualMethod=session.__emotionMethod || method;
+    const emotion=outputToEmotion(out, actualMethod);
     emotion.methodKey=method;
+    emotion.selectedMethod=method;
     emotion.modelPath=session.__emotionPath || '';
     emotionState.last=emotion;
     emotionState.lastTs=now;
@@ -1365,8 +1377,8 @@ async function analyzeEmotionForBox(box){
   }catch(e){
     e.retryAfter=performance.now()+5000;
     emotionState.errors[method]=e;
-    console.warn('表情推論に失敗しました。', e);
-    status.textContent=`表情推論に失敗: ${(getEmotionConfig(method)||{}).name||method} / ${describeEmotionLoadError(e)}`;
+    console.info('表情推論を一時停止しました。', e);
+    status.textContent=`表情推論を一時停止: ${(getEmotionConfig(method)||{}).name||method} / ${describeEmotionLoadError(e)}`;
     return (emotionState.last && emotionState.last.methodKey===method) ? emotionState.last : null;
   }
 }
@@ -1403,7 +1415,7 @@ function resetFaceMesh(reason=''){
   faceMetricsState.busy=false;
   faceMetricsState.pending=null;
   faceMetricsState.error=null;
-  if(reason) console.warn('FaceMeshをリセットしました:', reason);
+  if(reason) console.info('FaceMeshをリセットしました:', reason);
 }
 async function ensureFaceMesh(){
   if(faceMetricsState.disabled) return null;
@@ -1464,7 +1476,7 @@ async function analyzeFaceMetrics(){
     faceMetricsState.busy=false;
     faceMetricsState.pending=null;
     faceMetricsState.timeoutCount++;
-    if(faceMetricsState.timeoutCount<=2) console.warn('FaceMesh解析をスキップしました', e);
+    if(faceMetricsState.timeoutCount<=2) console.info('FaceMesh解析をスキップしました', e);
     if(faceMetricsState.timeoutCount>=2){
       faceMetricsState.nextTryTs=performance.now()+15000;
       resetFaceMesh(e && e.message ? e.message : e);
@@ -2354,7 +2366,7 @@ async function doYoloInference(){
     }catch(e){
       // 推論エラーも同一フレームごとに再試行しない。
       coco26LoadError=e;
-      console.error('YOLO26推論を停止しました。',e);
+      console.info('YOLO26推論を停止しました。',e);
       status.textContent='YOLO26読み込み/推論に失敗：'+(e.message||e);
     }
 
@@ -2512,13 +2524,13 @@ startBtn.onclick = async ()=>{
       lastInferAt=now;
       inferBusy=true;
       try { await doInferenceOnce(); }
-      catch(e){ console.error(e); status.textContent='推論エラー: '+(e.message||e); }
+      catch(e){ console.info(e); status.textContent='推論エラー: '+(e.message||e); }
       finally { inferBusy=false; }
     }, 35);
     if(chartTimer) clearInterval(chartTimer);
     chartTimer = setInterval(()=>{ updateRecordBadges(); if(!paused) drawNiceChart(); }, 180);
   }catch(e){
-    console.error(e);
+    console.info(e);
     stopCamera();
     running=false;
     startBtn.disabled=false;

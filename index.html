@@ -159,8 +159,8 @@
   <label>表情:<button type="button" class="helpBtn" data-help="emotion" aria-label="表情分析の説明">?</button>
     <select id="emoMethod" disabled>
       <option value="emotiefflib" selected>EmotiEffLib</option>
-      <option value="poster_affectnet8">POSTER V2 / AffectNet-8</option>
-      <option value="poster_rafdb">POSTER V2 / RAF-DB</option>
+      <option value="poster_affectnet8">POSTER V2 / AffectNet-8（ローカル）</option>
+      <option value="poster_rafdb">POSTER V2 / RAF-DB（ローカル）</option>
       <option value="off">OFF</option>
     </select>
   </label>
@@ -243,9 +243,9 @@
       <div class="meta">
         <div>POSTER V2 / POSTER++: Pyramid Cross-Fusion Transformer 系の顔表情認識。<a href="https://arxiv.org/abs/2204.04083" target="_blank" rel="noreferrer">POSTER論文</a> / <a href="https://arxiv.org/abs/2301.12149" target="_blank" rel="noreferrer">POSTER++論文</a></div>
         <div><b>POSTER V2 / AffectNet-8</b>: Web由来の大規模な「in-the-wild」顔画像で学習した8分類モデルです。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を扱います。軽蔑（contempt）を含むため、EmotiEffLibの8分類と比較しやすい設定です。</div>
-        <div><b>POSTER V2 / RAF-DB</b>: RAF-DBで学習した7分類モデルです。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を扱い、軽蔑（contempt）は含みません。比較的整った顔表情データセットで、POSTER V2の代表的な高精度ベンチマークとして使えます。</div>
+        <div><b>POSTER V2 / RAF-DB（ローカル）</b>: RAF-DBで学習した7分類モデルです。ローカル推論サーバー（<code>poster_v2_local_server.py</code>）へ顔画像を送って推論します。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を扱い、軽蔑（contempt）は含みません。比較的整った顔表情データセットで、POSTER V2の代表的な高精度ベンチマークとして使えます。</div>
         <div><b>EmotiEffLib</b>: EfficientNet/MobileNet系の軽量FER特徴抽出ライブラリ。<a href="https://arxiv.org/abs/2103.17107" target="_blank" rel="noreferrer">関連論文</a> / <a href="https://github.com/sb-ai-lab/EmotiEffLib" target="_blank" rel="noreferrer">EmotiEffLib GitHub</a></div>
-        <div>同階層に <code>poster_v2_affectnet8_int8.onnx</code>、<code>poster_v2_rafdb_int8.onnx</code>、<code>emotiefflib.onnx</code> を置くと、表情分析メニューから切り替えて推論できます。</div>
+        <div>GitHub Pages版では <code>emotiefflib.onnx</code> を同階層に置きます。POSTER V2はMac上で <code>poster_v2_local_server.py</code> を起動し、ローカルサーバーへ顔画像を送って推論します。</div>
       </div>
     </details>
     <details>
@@ -340,30 +340,33 @@ const sidePanel = document.getElementById('side');
 const tplThumb = document.getElementById('tplThumb');
 const tplCtx   = tplThumb.getContext('2d');
 
-/* ===== 表情分析（顔ROI → FER ONNX） ===== */
+/* ===== 表情分析（顔ROI → FER / POSTER Local） ===== */
 const EMOTION_INPUT_SIZE = 224;
-// この定数が未定義だとページ全体のJavaScriptが停止し、カメラ起動も動かなくなります。
-// GitHub Pages でONNXが404になる場合に備え、公開リポジトリのraw URLも試します。
-const POSTER_RAW_BASE = 'https://raw.githubusercontent.com/osaki2014/tracker/main/';
+// POSTER V2 は大きなモデルのため、GitHub Pages上ではなくローカル推論サーバーへ顔ROIを送って推論します。
+// Mac側で poster_v2_local_server.py を起動してください。
+const POSTER_LOCAL_URL = 'http://127.0.0.1:8765/predict';
 const EMOTION_CONFIGS = {
   emotiefflib: {
     name: 'EmotiEffLib',
     paths: ['./emotiefflib.onnx'],
     labels: ['anger','contempt','disgust','fear','happy','neutral','sad','surprise'],
-    dataset: 'AffectNet系 8分類'
+    dataset: 'AffectNet系 8分類',
+    type: 'onnx'
   },
   poster_affectnet8: {
-    name: 'POSTER V2 / AffectNet-8',
-    paths: ['./poster_v2_affectnet8_int8.onnx', POSTER_RAW_BASE + 'poster_v2_affectnet8_int8.onnx'],
+    name: 'POSTER V2 / AffectNet-8（ローカル）',
+    serverModel: 'affectnet8',
     labels: ['anger','contempt','disgust','fear','happy','neutral','sad','surprise'],
     dataset: 'AffectNet 8 cls',
+    type: 'local_poster',
     fallback: 'emotiefflib'
   },
   poster_rafdb: {
-    name: 'POSTER V2 / RAF-DB',
-    paths: ['./poster_v2_rafdb_int8.onnx', POSTER_RAW_BASE + 'poster_v2_rafdb_int8.onnx'],
+    name: 'POSTER V2 / RAF-DB（ローカル）',
+    serverModel: 'rafdb',
     labels: ['surprise','fear','disgust','happy','sad','anger','neutral'],
     dataset: 'RAF-DB 7 cls',
+    type: 'local_poster',
     fallback: 'emotiefflib'
   }
 };
@@ -487,8 +490,8 @@ const HELP_TEXT = {
     body:`<p><b>顔の写真から表情カテゴリを推定する機能</b>です。まずYOLOで顔を見つけ、その顔だけを切り出して、各表情カテゴリの確率を計算します。</p>
     <ul>
       <li><b>EmotiEffLib</b>: 軽量で動作確認しやすい8分類モデルです。リアルタイム処理やプロトタイプに向いています。</li>
-      <li><b>POSTER V2 / AffectNet-8</b>: Web由来の大規模なin-the-wild顔画像データで学習した8分類モデルです。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を出します。ブラウザ版ONNX Runtimeで開けない場合は自動的にEmotiEffLibで代替します。</li>
-      <li><b>POSTER V2 / RAF-DB</b>: RAF-DBで学習した7分類モデルです。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を出し、<code>contempt</code> は含みません。ブラウザ版ONNX Runtimeで開けない場合は自動的にEmotiEffLibで代替します。</li>
+      <li><b>POSTER V2 / AffectNet-8（ローカル）</b>: Web由来の大規模なin-the-wild顔画像データで学習した8分類モデルです。ローカル推論サーバー（<code>poster_v2_local_server.py</code>）へ顔画像を送って推論します。<code>anger, contempt, disgust, fear, happy, neutral, sad, surprise</code> を出します。ブラウザ版ONNX Runtimeで開けない場合は自動的にEmotiEffLibで代替します。</li>
+      <li><b>POSTER V2 / RAF-DB（ローカル）</b>: RAF-DBで学習した7分類モデルです。ローカル推論サーバー（<code>poster_v2_local_server.py</code>）へ顔画像を送って推論します。<code>surprise, fear, disgust, happy, sad, anger, neutral</code> を出し、<code>contempt</code> は含みません。ブラウザ版ONNX Runtimeで開けない場合は自動的にEmotiEffLibで代替します。</li>
     </ul>
     <p>同じ動画でも、AffectNet-8は多様な日常画像に強い一方、RAF-DBは7基本表情のベンチマーク精度比較に向きます。保育場面では「感情の断定」ではなく、モデル間で一致する傾向や時間変化をリフレクション材料として扱ってください。</p>
     <p>参考: <a href="https://arxiv.org/abs/2204.04083" target="_blank" rel="noreferrer">POSTER</a> / <a href="https://arxiv.org/abs/2301.12149" target="_blank" rel="noreferrer">POSTER++</a> / <a href="https://github.com/sb-ai-lab/EmotiEffLib" target="_blank" rel="noreferrer">EmotiEffLib GitHub</a></p>`
@@ -805,7 +808,8 @@ window.addEventListener('pointerup', async e=>{
   chartState.moved=false;
   playState.dragHandle=null;
   if(handle && playState.chartStart!=null){
-    await playSelectionAtChartTime(playState.chartStart, playState.duration);
+    if(running && !paused){ drawNiceChart(); }
+    else await playSelectionAtChartTime(playState.chartStart, playState.duration);
     setTimeout(()=>{ playState.suppressClick=false; }, 80);
   }else if(moved){
     playState.suppressClick=true;
@@ -817,14 +821,19 @@ window.addEventListener('pointerup', async e=>{
 chart.addEventListener('click', async e=>{
   closePinMenu();
   if(playState.suppressClick) return;
-  const pin=findPinAtEvent(e);
+  // 記録中はグラフから任意区間を再生しない。記録停止中のみピン範囲の再生を許可する。
+  if(running && !paused) return;
+  const pin=findPinRangeAtEvent(e) || findPinAtEvent(e);
   if(pin){ await playSelectionAtChartTime(pin.start,pin.duration); return; }
-  const t=timeAtChartEvent(e);
-  if(t!=null) await playSelectionAtChartTime(t, playState.duration || 1.0);
 });
 chart.addEventListener('contextmenu', e=>{
   e.preventDefault();
-  const pin=findPinAtEvent(e);
+  if(running && !paused){
+    closePinMenu();
+    status.textContent='記録中はグラフの再生・ピン・切り出し操作を停止しています。記録停止後に操作してください。';
+    return;
+  }
+  const pin=findPinRangeAtEvent(e) || findPinAtEvent(e);
   if(pin){ showPinMenu(pin,e.clientX,e.clientY); return; }
   const t=timeAtChartEvent(e);
   if(t==null) return;
@@ -1370,12 +1379,82 @@ function cropFaceTensor(box){
   }
   return new ort.Tensor('float32',input,[1,3,size,size]);
 }
+
+function cropFaceDataURL(box){
+  const size=EMOTION_INPUT_SIZE;
+  const cx=box.x+box.w/2, cy=box.y+box.h/2;
+  const side=Math.max(box.w,box.h)*1.25;
+  let sx=Math.max(0,cx-side/2), sy=Math.max(0,cy-side/2);
+  let sw=Math.min(view.width-sx,side), sh=Math.min(view.height-sy,side);
+  emoCtx.fillStyle='black'; emoCtx.fillRect(0,0,size,size);
+  if(vid.videoWidth && vid.videoHeight){
+    const vx=sx*vid.videoWidth/view.width, vy=sy*vid.videoHeight/view.height;
+    const vw=sw*vid.videoWidth/view.width, vh=sh*vid.videoHeight/view.height;
+    emoCtx.drawImage(vid,vx,vy,vw,vh,0,0,size,size);
+  }else{
+    emoCtx.drawImage(view,sx,sy,sw,sh,0,0,size,size);
+  }
+  return emoCanvas.toDataURL('image/jpeg',0.86);
+}
+
+async function analyzeLocalPosterForBox(box, method){
+  const cfg=getEmotionConfig(method);
+  if(!cfg) return null;
+  const now=performance.now();
+  if(emotionState.last && emotionState.last.methodKey===method && now-emotionState.lastTs<650) return emotionState.last;
+  // ローカルサーバーが落ちている時に毎フレーム通信しない。
+  const err=emotionState.errors[method];
+  if(err && err.retryAfter && performance.now()<err.retryAfter){
+    return (emotionState.last && emotionState.last.methodKey==='emotiefflib') ? emotionState.last : null;
+  }
+  try{
+    const res=await fetch(POSTER_LOCAL_URL,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:cfg.serverModel,image:cropFaceDataURL(box)})
+    });
+    if(!res.ok) throw new Error(`POSTERローカルサーバー HTTP ${res.status}`);
+    const data=await res.json();
+    if(data.error) throw new Error(data.error);
+    const emotion={
+      label:data.label || '',
+      score:Number(data.score || 0),
+      probs:Array.isArray(data.probs)?data.probs:[],
+      method:cfg.name,
+      dataset:cfg.dataset,
+      methodKey:method,
+      selectedMethod:method,
+      modelPath:'POSTER local server',
+      source:'local_poster'
+    };
+    emotionState.last=emotion;
+    emotionState.lastTs=now;
+    delete emotionState.errors[method];
+    return emotion;
+  }catch(e){
+    e.retryAfter=performance.now()+5000;
+    emotionState.errors[method]=e;
+    const fb=cfg.fallback || 'emotiefflib';
+    if(emoMethodSel.value===method){
+      emoMethodSel.value=fb;
+      emotionState.last=null;
+      emotionState.lastTs=0;
+    }
+    status.textContent=`${cfg.name}に接続できないためEmotiEffLibへ切替しました。Macで poster_v2_local_server.py を起動してください。`;
+    return null;
+  }
+}
+
 async function analyzeEmotionForBox(box){
   const method=emoMethodSel.value;
   if(method==='off') return null;
   if(!(box && (box.cls==='face-yolo' || box.cls==='face-device'))) return null;
   const now=performance.now();
   if(emotionState.last && emotionState.last.methodKey===method && now-emotionState.lastTs<300) return emotionState.last;
+  const cfgForMethod=getEmotionConfig(method);
+  if(cfgForMethod && cfgForMethod.type==='local_poster') {
+    return await analyzeLocalPosterForBox(box, method);
+  }
   const session=await ensureEmotionSession(method);
   if(!session) return (emotionState.last && emotionState.last.methodKey===method) ? emotionState.last : null;
   try{
@@ -1735,8 +1814,32 @@ function closePinMenu(){
 function pinDurationDefault(){
   return Math.max(0.2, playState.duration || 3.0);
 }
+
+function rangesOverlap(aStart,aDur,bStart,bDur){
+  const aEnd=aStart+Math.max(0,aDur||0), bEnd=bStart+Math.max(0,bDur||0);
+  return Math.max(aStart,bStart) < Math.min(aEnd,bEnd) - 0.02;
+}
+function overlappingPin(start,duration,ignoreId=null){
+  return pinState.pins.find(p=>p.id!==ignoreId && rangesOverlap(start,duration,p.start,p.duration)) || null;
+}
+function findPinRangeAtEvent(e){
+  const r=chartState.render; if(!r || !pinState.pins.length) return null;
+  const rect=chart.getBoundingClientRect();
+  const y=(e.clientY-rect.top)*(chart.height/rect.height);
+  if(y<r.T || y>r.h-r.B) return null;
+  const t=timeAtChartEvent(e);
+  if(t==null) return null;
+  return pinState.pins.find(p=>t>=p.start && t<=p.start+p.duration) || null;
+}
+
 function addPinAt(t, duration=pinDurationDefault()){
-  const pin={id:pinState.nextId++, start:t, duration:Math.max(0.2,duration||1.0), label:`Pin ${pinState.nextId-1}`};
+  duration=Math.max(0.2,duration||1.0);
+  const hit=overlappingPin(t,duration);
+  if(hit){
+    status.textContent=`既存ピン（${hit.label}）と範囲が重なるため、新しいピンは設置しません。`;
+    return null;
+  }
+  const pin={id:pinState.nextId++, start:t, duration, label:`Pin ${pinState.nextId-1}`};
   pinState.pins.push(pin);
   playState.chartStart=pin.start;
   playState.duration=pin.duration;
@@ -1871,9 +1974,10 @@ async function recordAudioClipFromPin(pin){
 function showRangeMenu(range,clientX,clientY){
   closePinMenu();
   const menu=document.createElement('div'); menu.className='pinMenu';
+  const hit=overlappingPin(range.start,range.duration);
   menu.innerHTML=`
     <button data-act="play">▶ この範囲を再生</button>
-    <button data-act="pin">📍 この範囲にピンを設置</button>
+    ${hit ? `<button data-act="pin" disabled title="既存ピン ${hit.label} と重複しています">📍 既存ピンと重複</button>` : `<button data-act="pin">📍 この範囲にピンを設置</button>`}
     <button data-act="csv">📄 この範囲のCSV保存</button>
     <button data-act="video">🎞 この範囲の動画保存</button>
     <button data-act="audio">🔊 この範囲の音声保存</button>`;
@@ -1882,7 +1986,7 @@ function showRangeMenu(range,clientX,clientY){
   menu.style.left=Math.min(clientX,window.innerWidth-rect.width-8)+'px';
   menu.style.top=Math.min(clientY,window.innerHeight-rect.height-8)+'px';
   menu.addEventListener('click',async e=>{
-    const act=e.target?.dataset?.act; if(!act) return;
+    const act=e.target?.dataset?.act; if(!act || e.target.disabled) return;
     closePinMenu();
     if(act==='play') await playSelectionAtChartTime(range.start,range.duration);
     if(act==='pin') addPinAt(range.start,range.duration);
@@ -1907,7 +2011,7 @@ function showPinMenu(pin,clientX,clientY){
   menu.style.left=Math.min(clientX,window.innerWidth-rect.width-8)+'px';
   menu.style.top=Math.min(clientY,window.innerHeight-rect.height-8)+'px';
   menu.addEventListener('click',async e=>{
-    const act=e.target?.dataset?.act; if(!act) return;
+    const act=e.target?.dataset?.act; if(!act || e.target.disabled) return;
     closePinMenu();
     if(act==='play') await playSelectionAtChartTime(pin.start,pin.duration);
     if(act==='csv') exportPinCsv(pin);
@@ -2717,7 +2821,11 @@ function desiredInferInterval(){
   const mode=modeSel.value;
   if(mode==='template') return 70;
   if(mode==='device-face') return 120;
-  if(mode==='yolo-face') return emoMethodSel.value==='off' ? 110 : 150;
+  if(mode==='yolo-face') {
+    if(emoMethodSel.value==='off') return 110;
+    if((getEmotionConfig(emoMethodSel.value)||{}).type==='local_poster') return 380;
+    return 150;
+  }
   return 170;
 }
 
@@ -2787,7 +2895,7 @@ pauseBtn.onclick = async ()=>{
   if(paused){
     await pauseMediaRecorders();
     chartState.viewEnd = null;
-    status.textContent='記録停止中：グラフをドラッグ/ホイールで過去へ移動、クリックで録画フレームを表示できます。';
+    status.textContent='記録停止中：グラフをドラッグ/ホイールで過去へ移動できます。右クリックで範囲メニュー、ピン範囲内の右クリックで再生・保存メニューを表示します。';
     drawNiceChart();
   }else{
     reviewingFrame=false;

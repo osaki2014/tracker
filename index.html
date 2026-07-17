@@ -111,7 +111,7 @@
 </script>
 
 <header>
-  <div class="appTitle">memo <span class="ver">v2026.07.17.1</span></div>
+  <div class="appTitle">memo <span class="ver">v2026.07.17.2</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -125,9 +125,12 @@
     <button id="saveVideo" disabled>🎥 録画保存</button>
     <button id="saveAudio" disabled>🎙 録音保存</button>
     <button id="transcribe" disabled>📝 Whisper++文字起こし</button>
+    <label class="compact"><input id="speakerDiarization" type="checkbox"> 話者分離（WavLM）</label>
+    <button type="button" class="helpBtn" data-help="diarization" aria-label="話者分離の説明">?</button>
     <button id="saveTranscript" disabled>⬇ 文字起こしCSV</button>
     <button type="button" class="helpBtn" data-help="whisper" aria-label="Whisper文字起こしの説明">?</button>
     <span id="whisperInfo" class="whisperInfo">未実行</span>
+    <span id="diarizationInfo" class="whisperInfo">話者分離 OFF</span>
     <button id="loadCsvBtn">📄 CSV読込</button>
     <button id="loadVideoBtn">🎞 録画読込</button>
     <button id="loadAudioBtn">🔊 音声読込</button>
@@ -303,6 +306,8 @@ const saveAudioBtn = document.getElementById('saveAudio');
 const transcribeBtn = document.getElementById('transcribe');
 const saveTranscriptBtn = document.getElementById('saveTranscript');
 const whisperInfo = document.getElementById('whisperInfo');
+const speakerDiarizationChk = document.getElementById('speakerDiarization');
+const diarizationInfo = document.getElementById('diarizationInfo');
 const loadCsvBtn = document.getElementById('loadCsvBtn');
 const loadVideoBtn = document.getElementById('loadVideoBtn');
 const loadAudioBtn = document.getElementById('loadAudioBtn');
@@ -408,6 +413,16 @@ const transcriptionState = {
   busy:false,
   error:null
 };
+const diarizationState = {
+  processor:null,
+  modelRunner:null,
+  loading:null,
+  model:'Xenova/wavlm-base-plus-sv',
+  centroids:[],
+  similarityThreshold:0.70,
+  busy:false,
+  error:null
+};
 let reviewingFrame=false;
 /* ▼▼ スライダ値（いつでも変更可能） */
 const P = {
@@ -507,9 +522,17 @@ const HELP_TEXT = {
   whisper: {
     title:'Whisper++文字起こし',
     body:`<p><b>録音した声を文章へ変えるAI</b>です。このアプリでは、多言語Whisperをブラウザ内で動かし、文章ごとの開始・終了時刻も保存します。</p>
-    <p>初回は約75MB級のモデルを取得するため時間がかかります。音声は文字起こしのために外部APIへ送信せず、モデル推論はこのブラウザ内で行います。ただしモデルファイル自体はHugging Faceからダウンロードします。</p>
+    <p><b>音声の書き出し手順:</b> マイク音声をMediaRecorderでWebM/Opus録音 → 停止・再開した区間を時系列に保持 → Web Audioで16kHz・モノラルへ変換 → Whisperで日本語を文字起こし → 発話区間を録画時刻・年月日・グラフ時刻へ対応付け → 通常CSVと文字起こし専用CSVへ保存します。</p>
+    <p>初回は約75MB級のモデルを取得するため時間がかかります。音声は文字起こしのために外部APIへ送信せず、モデル推論はこのブラウザ内で行います。ただしモデルファイル自体はHugging Faceからダウンロードします。聞き間違い・無音の文章化も起こり得るため、研究記録では録音と照合してください。</p>
     <p>「Whisper++」という公式モデル名はないため、本アプリではWhisperをWeb向けに実行する構成をWhisper++機能と呼んでいます。</p>
     <p>参考: <a href="https://cdn.openai.com/papers/whisper.pdf" target="_blank" rel="noreferrer">Whisper論文</a> / <a href="https://github.com/ggml-org/whisper.cpp" target="_blank" rel="noreferrer">whisper.cpp</a> / <a href="https://huggingface.co/docs/transformers.js/main/pipelines" target="_blank" rel="noreferrer">Transformers.js ASR</a></p>`
+  },
+  diarization: {
+    title:'話者分離（WavLM）',
+    body:`<p><b>「いつ、だれが話したか」を話者1・話者2…に分ける機能</b>です。人の名前を当てる機能ではありません。</p>
+    <p>Whisperが見つけた発話区間ごとに、WavLMの話者照合モデルで「声の指紋のような数値（512次元の埋め込み）」を作ります。前に聞いた声とのコサイン類似度を比べ、近ければ同じ話者、遠ければ新しい話者番号にします。すべてブラウザ内のWASMで動作します。</p>
+    <p>初回は量子化モデルの大きなダウンロードがあり、処理にも時間がかかります。短い発話、同時発話、反響、テレビ音声、強い雑音では番号が入れ替わることがあります。本機能は静的なGitHub Pagesで使える軽量な<b>話者クラスタリング</b>であり、Pythonサーバー上の完全なpyannote話者ダイアライゼーションとは異なります。</p>
+    <p>参考: <a href="https://arxiv.org/abs/2110.13900" target="_blank" rel="noreferrer">WavLM論文</a> / <a href="https://huggingface.co/microsoft/wavlm-base-plus-sv" target="_blank" rel="noreferrer">WavLM話者照合モデル</a> / <a href="https://huggingface.co/docs/transformers.js/v3.0.0/en/api/models#models.WavLMForXVector" target="_blank" rel="noreferrer">Transformers.js実装例</a> / <a href="https://arxiv.org/abs/1911.01255" target="_blank" rel="noreferrer">pyannote.audio論文</a></p>`
   }
 };
 function openHelp(key){
@@ -873,7 +896,9 @@ function pushData(x,y,emotion=null,faceMetrics=null,audioMetrics=null){
 function resetData(){
   series=[]; records=[]; mediaRecordState.frameSnapshots=[]; mediaRecordState.lastSnapshotTs=0;
   transcriptionState.segments=[]; transcriptionState.error=null;
+  diarizationState.centroids=[]; diarizationState.error=null;
   whisperInfo.textContent='未実行';
+  diarizationInfo.textContent=speakerDiarizationChk.checked?'待機中':'話者分離 OFF';
   saveTranscriptBtn.disabled=true;
   stopPlaybackTimer();
   playState.chartStart=null; playState.progress=null; playState.duration=1.0; playState.dragHandle=null;
@@ -1577,6 +1602,88 @@ async function ensureWhisperTranscriber(){
   }).finally(()=>{ transcriptionState.loading=null; });
   return transcriptionState.loading;
 }
+async function ensureDiarizationModel(){
+  if(diarizationState.processor && diarizationState.modelRunner){
+    return {processor:diarizationState.processor,model:diarizationState.modelRunner};
+  }
+  if(diarizationState.loading) return diarizationState.loading;
+  diarizationState.loading=(async()=>{
+    diarizationInfo.textContent='WavLM読込中…';
+    const mod=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0');
+    const progress_callback=p=>{
+      if(p && typeof p.progress==='number') diarizationInfo.textContent=`WavLM読込 ${Math.round(p.progress)}%`;
+    };
+    const [processor,model]=await Promise.all([
+      mod.AutoProcessor.from_pretrained(diarizationState.model,{progress_callback}),
+      mod.AutoModel.from_pretrained(diarizationState.model,{device:'wasm',dtype:'q8',progress_callback})
+    ]);
+    diarizationState.processor=processor;
+    diarizationState.modelRunner=model;
+    diarizationInfo.textContent='WavLM準備完了';
+    return {processor,model};
+  })().catch(e=>{
+    diarizationState.error=e;
+    diarizationInfo.textContent='話者モデル読込失敗';
+    throw e;
+  }).finally(()=>{ diarizationState.loading=null; });
+  return diarizationState.loading;
+}
+function normalizedVector(tensor){
+  if(!tensor?.data?.length) throw new Error('WavLMの話者埋め込みを取得できませんでした');
+  const dims=tensor.dims||[];
+  const data=tensor.data;
+  const width=dims.length ? dims[dims.length-1] : data.length;
+  const rows=Math.max(1,Math.floor(data.length/width));
+  const out=new Float32Array(width);
+  for(let r=0;r<rows;r++) for(let j=0;j<width;j++) out[j]+=Number(data[r*width+j]||0)/rows;
+  let norm=0;
+  for(const v of out) norm+=v*v;
+  norm=Math.sqrt(norm)||1;
+  for(let j=0;j<out.length;j++) out[j]/=norm;
+  return out;
+}
+function cosineSimilarity(a,b){
+  let sum=0;
+  for(let i=0;i<Math.min(a.length,b.length);i++) sum+=a[i]*b[i];
+  return sum;
+}
+function voiceClip(audio,startSec,endSec){
+  const sr=16000;
+  const center=Math.max(0,(startSec+endSec)/2);
+  const desired=Math.min(8,Math.max(1.2,endSec-startSec+0.4));
+  let a=Math.max(0,Math.floor((center-desired/2)*sr));
+  let b=Math.min(audio.length,Math.ceil((center+desired/2)*sr));
+  if(b-a<sr && audio.length>=sr){
+    a=Math.max(0,Math.min(audio.length-sr,Math.floor(center*sr-sr/2)));
+    b=a+sr;
+  }
+  return audio.slice(a,b);
+}
+async function speakerForClip(clip){
+  if(clip.length<3200) return {speaker:'話者不明',similarity:''};
+  const {processor,model}=await ensureDiarizationModel();
+  const inputs=await processor(clip);
+  const outputs=await model(inputs);
+  const vector=normalizedVector(outputs.embeddings||outputs.logits||outputs.last_hidden_state);
+  let best=-Infinity,bestIndex=-1;
+  diarizationState.centroids.forEach((c,i)=>{
+    const sim=cosineSimilarity(vector,c.vector);
+    if(sim>best){ best=sim; bestIndex=i; }
+  });
+  if(bestIndex<0 || best<diarizationState.similarityThreshold){
+    diarizationState.centroids.push({vector,count:1});
+    bestIndex=diarizationState.centroids.length-1;
+    best=1;
+  }else{
+    const c=diarizationState.centroids[bestIndex];
+    const n=c.count+1;
+    for(let i=0;i<c.vector.length;i++) c.vector[i]=(c.vector[i]*c.count+vector[i])/n;
+    let norm=0; for(const v of c.vector) norm+=v*v;
+    norm=Math.sqrt(norm)||1; for(let i=0;i<c.vector.length;i++) c.vector[i]/=norm;
+    c.count=n;
+  }
+  return {speaker:`話者${bestIndex+1}`,similarity:best};
+}
 function chartTimeForMediaTime(mediaTime){
   const pts=series.filter(p=>typeof p.mediaTime==='number' && isFinite(p.mediaTime));
   if(!pts.length){
@@ -1603,9 +1710,21 @@ async function transcribeRecordedAudio(){
   if(!sources.length){ alert('文字起こしできる録音がありません'); return; }
   transcriptionState.busy=true;
   transcriptionState.segments=[];
+  diarizationState.centroids=[];
+  diarizationState.error=null;
+  const useDiarization=!!speakerDiarizationChk.checked;
+  let diarizationReady=useDiarization;
+  if(!useDiarization) diarizationInfo.textContent='話者分離 OFF';
   updateRecordBadges();
   try{
     const transcriber=await ensureWhisperTranscriber();
+    if(useDiarization){
+      try{ await ensureDiarizationModel(); }
+      catch(e){
+        console.warn('WavLM speaker model unavailable; transcription continues without speaker labels.',e);
+        diarizationReady=false;
+      }
+    }
     for(let i=0;i<sources.length;i++){
       whisperInfo.textContent=`文字起こし ${i+1}/${sources.length}`;
       const audio=await audioBlobTo16kMono(sources[i].blob);
@@ -1626,19 +1745,29 @@ async function transcribeRecordedAudio(){
         const chartEnd=chartTimeForMediaTime(mediaEnd);
         const startMs=absoluteMsFromT(chartStart), endMs=absoluteMsFromT(chartEnd);
         const startDate=new Date(startMs), endDate=new Date(endMs);
+        let speaker='',speakerSimilarity='';
+        if(diarizationReady && String(chunk.text||'').trim()){
+          diarizationInfo.textContent=`話者分析 ${transcriptionState.segments.length+1}区間目`;
+          const assigned=await speakerForClip(voiceClip(audio,relStart,Math.max(relStart,relEnd)));
+          speaker=assigned.speaker;
+          speakerSimilarity=assigned.similarity;
+        }
         transcriptionState.segments.push({
           mediaStart,mediaEnd,chartStart,chartEnd,
           startIso:startDate.toISOString(),endIso:endDate.toISOString(),
           startLocal:startDate.toLocaleString('ja-JP',{hour12:false}),
           endLocal:endDate.toLocaleString('ja-JP',{hour12:false}),
+          speaker,speakerSimilarity,
+          speakerMethod:speaker?'WavLM-XVector cosine online clustering':'',
           text:String(chunk.text||'').trim()
         });
       }
     }
     transcriptionState.segments=transcriptionState.segments.filter(s=>s.text);
     whisperInfo.textContent=`完了 ${transcriptionState.segments.length}区間`;
+    if(diarizationReady) diarizationInfo.textContent=`${diarizationState.centroids.length}話者候補`;
     saveTranscriptBtn.disabled=!transcriptionState.segments.length;
-    status.textContent=`Whisper++文字起こしが完了しました（${transcriptionState.segments.length}区間）。CSV保存に文章と時刻を追加しました。`;
+    status.textContent=`Whisper++文字起こしが完了しました（${transcriptionState.segments.length}区間${diarizationReady?`・${diarizationState.centroids.length}話者候補`:''}）。CSV保存に文章・話者・時刻を追加しました。${useDiarization&&!diarizationReady?' 話者モデルを取得できなかったため話者列は空欄です。':''}`;
   }catch(e){
     console.error('Whisper transcription failed',e);
     transcriptionState.error=e;
@@ -2520,7 +2649,7 @@ function csvEscape(value){
 }
 dlBtn.onclick = ()=>{
   if(!records.length){ alert('記録がありません'); return; }
-  let csv='time,datetime,date,clock,media_time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db,transcript_start,transcript_end,transcript_text\n';
+  let csv='time,datetime,date,clock,media_time,id,class,x,y,emotion,emotion_score,emotion_method,yaw_deg,pitch_deg,head_horizontal,head_vertical,mouth_open,mouth_ratio,speech_on,volume_db,transcript_start,transcript_end,speaker,speaker_similarity,speaker_method,transcript_text\n';
   records.forEach(r=>{
     const dt=r.datetime ? {datetime:r.datetime,date:r.date||'',clock:r.clock||''} : dateFieldsFromT(r.t);
     const score = typeof r.emotionScore==='number' ? r.emotionScore.toFixed(4) : '';
@@ -2530,7 +2659,8 @@ dlBtn.onclick = ()=>{
     const vol = typeof r.volumeDb==='number' ? r.volumeDb.toFixed(2) : '';
     const mediaTime = typeof r.mediaTime==='number' ? r.mediaTime.toFixed(2) : '';
     const tr=transcriptionAtMediaTime(r.mediaTime);
-    const row=[r.t.toFixed(2),dt.datetime,dt.date,dt.clock,mediaTime,r.id,r.cls,r.x.toFixed(1),r.y.toFixed(1),r.emotion||'',score,r.emotionMethod||'',yaw,pitch,r.headHorizontal||'',r.headVertical||'',r.mouthOpen??'',mouth,r.speech??'',vol,tr?.startLocal||'',tr?.endLocal||'',tr?.text||''];
+    const speakerSim=typeof tr?.speakerSimilarity==='number' ? tr.speakerSimilarity.toFixed(4) : '';
+    const row=[r.t.toFixed(2),dt.datetime,dt.date,dt.clock,mediaTime,r.id,r.cls,r.x.toFixed(1),r.y.toFixed(1),r.emotion||'',score,r.emotionMethod||'',yaw,pitch,r.headHorizontal||'',r.headVertical||'',r.mouthOpen??'',mouth,r.speech??'',vol,tr?.startLocal||'',tr?.endLocal||'',tr?.speaker||'',speakerSim,tr?.speakerMethod||'',tr?.text||''];
     csv+=row.map(csvEscape).join(',')+'\n';
   });
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob);
@@ -2555,11 +2685,18 @@ saveAudioBtn.onclick = async ()=>{
   status.textContent='録音ファイルを保存しました。';
 };
 transcribeBtn.onclick=()=>transcribeRecordedAudio();
+speakerDiarizationChk.addEventListener('change',()=>{
+  diarizationState.centroids=[];
+  diarizationInfo.textContent=speakerDiarizationChk.checked
+    ? (diarizationState.modelRunner?'WavLM準備完了':'次回文字起こし時に読込')
+    : '話者分離 OFF';
+});
 saveTranscriptBtn.onclick=()=>{
   if(!transcriptionState.segments.length){ alert('文字起こしデータがありません'); return; }
-  let csv='segment,media_start,media_end,start_datetime,end_datetime,start_iso,end_iso,text\n';
+  let csv='segment,media_start,media_end,start_datetime,end_datetime,start_iso,end_iso,speaker,speaker_similarity,speaker_method,text\n';
   transcriptionState.segments.forEach((s,i)=>{
-    csv+=[i+1,s.mediaStart.toFixed(3),s.mediaEnd.toFixed(3),s.startLocal,s.endLocal,s.startIso,s.endIso,s.text].map(csvEscape).join(',')+'\n';
+    const speakerSim=typeof s.speakerSimilarity==='number' ? s.speakerSimilarity.toFixed(4) : '';
+    csv+=[i+1,s.mediaStart.toFixed(3),s.mediaEnd.toFixed(3),s.startLocal,s.endLocal,s.startIso,s.endIso,s.speaker||'',speakerSim,s.speakerMethod||'',s.text].map(csvEscape).join(',')+'\n';
   });
   downloadBlob(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}),'transcript_whisper.csv');
   status.textContent='時間付き文字起こしCSVを保存しました。';

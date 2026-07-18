@@ -1,6 +1,9 @@
 <!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
 <title>物体/顔検出 + 手動トラッカ（YOLOv11 / ONNX / iPad）</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;600;700&display=swap');
@@ -61,6 +64,15 @@
   #helpCard ul{padding-left:22px}
   #helpClose{float:right;padding:6px 10px}
   .chartHint{width:calc(100vw - 24px);margin:0 auto 6px;color:#64756f;font-size:13px;padding:0 10px}
+  #transcriptPanel{width:calc(100vw - 24px);margin:12px auto 28px;padding:16px 18px;background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow)}
+  #transcriptPanel h2{margin:0 0 4px;font-size:19px;color:#48645e}
+  #transcriptSummary{font-size:13px;color:var(--muted);margin-bottom:10px}
+  .transcriptScroll{overflow:auto;max-height:320px;border:1px solid #dbe9e5;border-radius:14px}
+  #transcriptTable{width:100%;border-collapse:collapse;background:#fff;font-size:14px}
+  #transcriptTable th,#transcriptTable td{padding:8px 10px;border-bottom:1px solid #e8efed;text-align:left;vertical-align:top;white-space:nowrap}
+  #transcriptTable th{position:sticky;top:0;background:#edf8f5;color:#48645e;z-index:1}
+  #transcriptTable td:last-child{white-space:normal;min-width:280px}
+  .speakerBadge{display:inline-block;padding:2px 8px;border-radius:999px;background:#e9f7f4;border:1px solid #bfe4d9;color:#356b60;font-weight:700}
   /* レイアウト */
   #wrap{width:min(1220px,100%);margin:14px auto 8px;padding:0 12px;display:block}
   #stage{position:relative;border-radius:26px}
@@ -111,7 +123,7 @@
 </script>
 
 <header>
-  <div class="appTitle">memo <span class="ver">v2026.07.17.2</span></div>
+  <div class="appTitle">memo <span class="ver">v2026.07.18.1</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -124,7 +136,7 @@
     <button id="download" disabled>⬇ CSV保存</button>
     <button id="saveVideo" disabled>🎥 録画保存</button>
     <button id="saveAudio" disabled>🎙 録音保存</button>
-    <button id="transcribe" disabled>📝 Whisper++文字起こし</button>
+    <button id="transcribe" disabled>📝 Whisper文字起こし</button>
     <label class="compact"><input id="speakerDiarization" type="checkbox"> 話者分離（WavLM）</label>
     <button type="button" class="helpBtn" data-help="diarization" aria-label="話者分離の説明">?</button>
     <button id="saveTranscript" disabled>⬇ 文字起こしCSV</button>
@@ -272,6 +284,16 @@
 <canvas id="chart" height="280"></canvas>
 <div class="chartHint">グラフ操作：ホイール/トラックボールで表示時間を拡大・縮小、ドラッグで過去へ移動、ダブルクリックで現在へ戻って自動スクロール。記録中に過去へ移動しても、裏では記録を続けます。</div>
 <div id="status"></div>
+<section id="transcriptPanel" hidden aria-live="polite">
+  <h2>Whisper文字起こし結果</h2>
+  <div id="transcriptSummary"></div>
+  <div class="transcriptScroll">
+    <table id="transcriptTable">
+      <thead><tr><th>開始</th><th>終了</th><th>話者</th><th>類似度</th><th>文字起こし</th></tr></thead>
+      <tbody id="transcriptRows"></tbody>
+    </table>
+  </div>
+</section>
 <div id="helpOverlay" role="dialog" aria-modal="true">
   <div id="helpCard">
     <button id="helpClose" type="button">閉じる</button>
@@ -285,6 +307,7 @@
 const COCO11_MODEL_PATH = './yolo11n.onnx';       // Ultralytics YOLOv11n ONNX (float32)
 const COCO26_MODEL_PATH = './yolo26n.onnx';       // Ultralytics YOLO26n ONNX End-to-End
 const FACE_MODEL_PATH   = './yolov8n-face.onnx';  // 使う場合のみ同フォルダに置く
+const TRANSFORMERS_JS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
 const IN_SIZE  = 256;
 const SCORE_TH = 0.50, NMS_IOU = 0.45, MAX_DET = 20;
 
@@ -308,6 +331,9 @@ const saveTranscriptBtn = document.getElementById('saveTranscript');
 const whisperInfo = document.getElementById('whisperInfo');
 const speakerDiarizationChk = document.getElementById('speakerDiarization');
 const diarizationInfo = document.getElementById('diarizationInfo');
+const transcriptPanel = document.getElementById('transcriptPanel');
+const transcriptSummary = document.getElementById('transcriptSummary');
+const transcriptRows = document.getElementById('transcriptRows');
 const loadCsvBtn = document.getElementById('loadCsvBtn');
 const loadVideoBtn = document.getElementById('loadVideoBtn');
 const loadAudioBtn = document.getElementById('loadAudioBtn');
@@ -409,7 +435,10 @@ const transcriptionState = {
   transcriber:null,
   loading:null,
   segments:[],
-  model:'onnx-community/whisper-tiny',
+  model:'Xenova/whisper-tiny',
+  revision:'5332fcc35e32a33b86612b9a57a89be7906102b1',
+  dtype:'q8',
+  fallbackUsed:false,
   busy:false,
   error:null
 };
@@ -424,6 +453,16 @@ const diarizationState = {
   error:null
 };
 let reviewingFrame=false;
+let transformersModulePromise=null;
+function loadTransformersModule(){
+  if(!transformersModulePromise){
+    transformersModulePromise=import(TRANSFORMERS_JS_URL).catch(e=>{
+      transformersModulePromise=null;
+      throw e;
+    });
+  }
+  return transformersModulePromise;
+}
 /* ▼▼ スライダ値（いつでも変更可能） */
 const P = {
   keep: 0.45,
@@ -520,11 +559,11 @@ const HELP_TEXT = {
     <p>参考: <a href="https://webrtc.org/" target="_blank" rel="noreferrer">WebRTC</a> / <a href="https://developer.mozilla.org/docs/Web/API/AnalyserNode" target="_blank" rel="noreferrer">Web Audio AnalyserNode</a></p>`
   },
   whisper: {
-    title:'Whisper++文字起こし',
+    title:'Whisper文字起こし',
     body:`<p><b>録音した声を文章へ変えるAI</b>です。このアプリでは、多言語Whisperをブラウザ内で動かし、文章ごとの開始・終了時刻も保存します。</p>
     <p><b>音声の書き出し手順:</b> マイク音声をMediaRecorderでWebM/Opus録音 → 停止・再開した区間を時系列に保持 → Web Audioで16kHz・モノラルへ変換 → Whisperで日本語を文字起こし → 発話区間を録画時刻・年月日・グラフ時刻へ対応付け → 通常CSVと文字起こし専用CSVへ保存します。</p>
-    <p>初回は約75MB級のモデルを取得するため時間がかかります。音声は文字起こしのために外部APIへ送信せず、モデル推論はこのブラウザ内で行います。ただしモデルファイル自体はHugging Faceからダウンロードします。聞き間違い・無音の文章化も起こり得るため、研究記録では録音と照合してください。</p>
-    <p>「Whisper++」という公式モデル名はないため、本アプリではWhisperをWeb向けに実行する構成をWhisper++機能と呼んでいます。</p>
+    <p>初回は量子化モデルを取得するため時間がかかります。端末との互換性がない場合は、自動的に容量の大きいFP32モデルへ一度だけ切り替えます。音声は文字起こしのために外部APIへ送信せず、モデル推論はこのブラウザ内で行います。ただしモデルファイル自体はHugging Faceからダウンロードします。聞き間違い・無音の文章化も起こり得るため、研究記録では録音と照合してください。</p>
+    <p>本アプリではOpenAIのWhisperを、Transformers.jsとONNX Runtime Webを使ってブラウザ内で実行します。</p>
     <p>参考: <a href="https://cdn.openai.com/papers/whisper.pdf" target="_blank" rel="noreferrer">Whisper論文</a> / <a href="https://github.com/ggml-org/whisper.cpp" target="_blank" rel="noreferrer">whisper.cpp</a> / <a href="https://huggingface.co/docs/transformers.js/main/pipelines" target="_blank" rel="noreferrer">Transformers.js ASR</a></p>`
   },
   diarization: {
@@ -900,6 +939,7 @@ function resetData(){
   whisperInfo.textContent='未実行';
   diarizationInfo.textContent=speakerDiarizationChk.checked?'待機中':'話者分離 OFF';
   saveTranscriptBtn.disabled=true;
+  renderTranscriptPreview();
   stopPlaybackTimer();
   playState.chartStart=null; playState.progress=null; playState.duration=1.0; playState.dragHandle=null;
   chartState.viewEnd=null; chartState.windowSec=10; reviewingFrame=false;
@@ -1584,16 +1624,28 @@ async function ensureWhisperTranscriber(){
   if(transcriptionState.loading) return transcriptionState.loading;
   transcriptionState.loading=(async()=>{
     whisperInfo.textContent='Whisperモデル読込中…';
-    const mod=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0');
-    const pipe=await mod.pipeline('automatic-speech-recognition',transcriptionState.model,{
-      device:'wasm',
-      dtype:'q8',
-      progress_callback:p=>{
-        if(p && typeof p.progress==='number') whisperInfo.textContent=`モデル読込 ${Math.round(p.progress)}%`;
-      }
-    });
+    const mod=await loadTransformersModule();
+    const progress_callback=p=>{
+      if(p && typeof p.progress==='number') whisperInfo.textContent=`モデル読込 ${Math.round(p.progress)}%`;
+    };
+    let pipe;
+    try{
+      pipe=await mod.pipeline('automatic-speech-recognition',transcriptionState.model,{
+        device:'wasm',dtype:'q8',revision:transcriptionState.revision,progress_callback
+      });
+      transcriptionState.dtype='q8';
+      transcriptionState.fallbackUsed=false;
+    }catch(q8Error){
+      console.warn('Whisper q8 model could not start. Retrying once with fp32.',q8Error);
+      whisperInfo.textContent='互換モード（FP32）へ切替中…';
+      pipe=await mod.pipeline('automatic-speech-recognition',transcriptionState.model,{
+        device:'wasm',dtype:'fp32',revision:transcriptionState.revision,progress_callback
+      });
+      transcriptionState.dtype='fp32';
+      transcriptionState.fallbackUsed=true;
+    }
     transcriptionState.transcriber=pipe;
-    whisperInfo.textContent='Whisper準備完了';
+    whisperInfo.textContent=`Whisper準備完了 ${transcriptionState.dtype.toUpperCase()}`;
     return pipe;
   })().catch(e=>{
     transcriptionState.error=e;
@@ -1609,7 +1661,7 @@ async function ensureDiarizationModel(){
   if(diarizationState.loading) return diarizationState.loading;
   diarizationState.loading=(async()=>{
     diarizationInfo.textContent='WavLM読込中…';
-    const mod=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0');
+    const mod=await loadTransformersModule();
     const progress_callback=p=>{
       if(p && typeof p.progress==='number') diarizationInfo.textContent=`WavLM読込 ${Math.round(p.progress)}%`;
     };
@@ -1700,6 +1752,27 @@ function transcriptionAtMediaTime(mediaTime){
   if(typeof mediaTime!=='number') return null;
   return transcriptionState.segments.find(s=>mediaTime>=s.mediaStart && mediaTime<=s.mediaEnd) || null;
 }
+function renderTranscriptPreview(){
+  transcriptRows.replaceChildren();
+  const segments=transcriptionState.segments;
+  transcriptPanel.hidden=!segments.length;
+  if(!segments.length){ transcriptSummary.textContent=''; return; }
+  const speakers=[...new Set(segments.map(s=>s.speaker).filter(Boolean))];
+  transcriptSummary.textContent=`${segments.length}区間 / ${speakers.length?speakers.length+'話者候補':'話者分離なし'} / Whisper ${transcriptionState.dtype.toUpperCase()}`;
+  for(const s of segments){
+    const tr=document.createElement('tr');
+    const values=[s.startLocal||'',s.endLocal||''];
+    values.forEach(value=>{ const td=document.createElement('td'); td.textContent=value; tr.appendChild(td); });
+    const speakerTd=document.createElement('td');
+    const badge=document.createElement('span'); badge.className='speakerBadge'; badge.textContent=s.speaker||'未分離';
+    speakerTd.appendChild(badge); tr.appendChild(speakerTd);
+    const similarityTd=document.createElement('td');
+    similarityTd.textContent=typeof s.speakerSimilarity==='number'?s.speakerSimilarity.toFixed(3):'–';
+    tr.appendChild(similarityTd);
+    const textTd=document.createElement('td'); textTd.textContent=s.text||''; tr.appendChild(textTd);
+    transcriptRows.appendChild(tr);
+  }
+}
 async function transcribeRecordedAudio(){
   if(transcriptionState.busy) return;
   const shouldResume=running && !paused && recordAudioChk.checked && !!mediaRecordState.audioRecorder;
@@ -1710,6 +1783,7 @@ async function transcribeRecordedAudio(){
   if(!sources.length){ alert('文字起こしできる録音がありません'); return; }
   transcriptionState.busy=true;
   transcriptionState.segments=[];
+  renderTranscriptPreview();
   diarizationState.centroids=[];
   diarizationState.error=null;
   const useDiarization=!!speakerDiarizationChk.checked;
@@ -1764,15 +1838,19 @@ async function transcribeRecordedAudio(){
       }
     }
     transcriptionState.segments=transcriptionState.segments.filter(s=>s.text);
-    whisperInfo.textContent=`完了 ${transcriptionState.segments.length}区間`;
+    renderTranscriptPreview();
+    whisperInfo.textContent=`完了 ${transcriptionState.segments.length}区間 / ${transcriptionState.dtype.toUpperCase()}`;
     if(diarizationReady) diarizationInfo.textContent=`${diarizationState.centroids.length}話者候補`;
     saveTranscriptBtn.disabled=!transcriptionState.segments.length;
-    status.textContent=`Whisper++文字起こしが完了しました（${transcriptionState.segments.length}区間${diarizationReady?`・${diarizationState.centroids.length}話者候補`:''}）。CSV保存に文章・話者・時刻を追加しました。${useDiarization&&!diarizationReady?' 話者モデルを取得できなかったため話者列は空欄です。':''}`;
+    status.textContent=`Whisper文字起こしが完了しました（${transcriptionState.segments.length}区間${diarizationReady?`・${diarizationState.centroids.length}話者候補`:''}）。CSV保存に文章・話者・時刻を追加しました。${useDiarization&&!diarizationReady?' 話者モデルを取得できなかったため話者列は空欄です。':''}`;
   }catch(e){
     console.error('Whisper transcription failed',e);
     transcriptionState.error=e;
     whisperInfo.textContent='文字起こし失敗';
-    status.textContent='文字起こしに失敗しました: '+(e.message||e);
+    const msg=String(e?.message||e);
+    status.textContent=/TransposeDQWeights|Missing required scale|create a session/i.test(msg)
+      ? 'Whisperモデルの起動に失敗しました。ページを強制再読み込みしてから、もう一度お試しください。'
+      : '文字起こしに失敗しました: '+msg;
   }finally{
     transcriptionState.busy=false;
     if(shouldResume) await startAudioRecording();

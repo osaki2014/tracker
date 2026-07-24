@@ -4,7 +4,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
-<title>物体/顔検出 + 手動トラッカ（YOLOv11 / ONNX / iPad）</title>
+<title>みまもりAI — 映像・表情・音声分析</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;600;700&display=swap');
   :root{
@@ -141,7 +141,7 @@
 </script>
 
 <header>
-  <div class="appTitle">memo <span class="ver">v2026.07.18.3</span></div>
+  <div class="appTitle">みまもりAI <span class="ver">v2026.07.24.1</span></div>
   <span class="toolbarGroup record">
     <button id="start">▶ カメラ起動</button>
     <button id="stop" hidden disabled>■ 停止</button>
@@ -171,11 +171,12 @@
     <span id="whisperInfo" class="whisperInfo">未実行</span>
     <span id="diarizationInfo" class="whisperInfo">話者分離 待機中</span>
     <button id="loadCsvBtn">📄 CSV読込</button>
-    <button id="loadVideoBtn">🎞 録画読込</button>
+    <button id="loadVideoBtn">🎞 動画解析</button>
     <button id="loadAudioBtn">🔊 音声読込</button>
+    <span id="sourceInfo" class="whisperInfo">入力: カメラ</span>
   </span>
   <input id="loadCsv" type="file" accept=".csv,text/csv" hidden>
-  <input id="loadVideo" type="file" accept="video/*,.webm" hidden>
+  <input id="loadVideo" type="file" accept=".mp4,video/mp4,.webm,video/webm,video/*" hidden>
   <input id="loadAudio" type="file" accept="audio/*,.webm" hidden>
 
   <label>モード:<button type="button" class="helpBtn" data-help="mode" aria-label="モードの説明">?</button>
@@ -375,6 +376,7 @@ const loadAudioBtn = document.getElementById('loadAudioBtn');
 const loadCsvInput = document.getElementById('loadCsv');
 const loadVideoInput = document.getElementById('loadVideo');
 const loadAudioInput = document.getElementById('loadAudio');
+const sourceInfo = document.getElementById('sourceInfo');
 
 const modeSel = document.getElementById('mode');
 const clsSel  = document.getElementById('cls');
@@ -453,6 +455,16 @@ const mediaRecordState = {
   videoStartPerf:0, audioStartPerf:0,
   replayVideo:null,
   frameSnapshots:[], lastSnapshotTs:0
+};
+const inputSourceState = {
+  type:'camera',
+  file:null,
+  objectUrl:null,
+  duration:0,
+  hasAudio:null,
+  ended:false,
+  transcriptionBlob:null,
+  transcriptionKind:''
 };
 const chartState = { viewEnd:null, windowSec:10, minWindowSec:1, maxWindowSec:600, drag:false, dragX:0, dragEnd:0, moved:false, render:null };
 const playState = {
@@ -652,6 +664,7 @@ let inferTimer = null;
 let inferBusy = false;
 let chartTimer = null;
 let lastInferAt = 0;
+let drawLoopGeneration = 0;
 
 /* ===== カメラ：開始/停止/再起動 + ウォッチドッグ ===== */
 function cameraErrorMessage(e){
@@ -699,8 +712,23 @@ async function openCamera(){
   track.onmute  = ()=>{ console.warn('camera muted'); };
   track.onunmute= ()=>{ console.log('camera unmuted'); };
 
+  inputSourceState.type='camera';
+  inputSourceState.file=null;
+  inputSourceState.duration=0;
+  inputSourceState.ended=false;
+  if(inputSourceState.transcriptionKind==='video'){
+    inputSourceState.transcriptionBlob=null;
+    inputSourceState.transcriptionKind='';
+  }
+  if(inputSourceState.objectUrl){
+    URL.revokeObjectURL(inputSourceState.objectUrl);
+    inputSourceState.objectUrl=null;
+  }
+  vid.removeAttribute('src');
   vid.srcObject = camStream;
+  vid.muted=true;
   await vid.play();
+  sourceInfo.textContent='入力: カメラ';
 
   if(camWatch) clearInterval(camWatch);
   lastVideoTime = vid.currentTime;
@@ -724,14 +752,34 @@ function stopCamera(){
     }
   }catch(e){ console.warn('stopCamera warn:', e); }
 }
+function stopFileInput(){
+  try{ vid.pause(); }catch{}
+  vid.removeAttribute('src');
+  try{ vid.load(); }catch{}
+  if(inputSourceState.objectUrl){
+    URL.revokeObjectURL(inputSourceState.objectUrl);
+    inputSourceState.objectUrl=null;
+  }
+  inputSourceState.file=null;
+  inputSourceState.duration=0;
+  inputSourceState.hasAudio=null;
+  inputSourceState.ended=false;
+}
+function stopInputSource(){
+  if(inputSourceState.type==='file') stopFileInput();
+  else stopCamera();
+}
 async function stopApp(){
   paused=true;
   running=false;
+  videoMeterToken++;
+  drawLoopGeneration++;
   await pauseMediaRecorders();
   stopPlaybackTimer();
   if(inferTimer){ clearInterval(inferTimer); inferTimer=null; }
   if(chartTimer){ clearInterval(chartTimer); chartTimer=null; }
-  stopCamera();
+  stopInputSource();
+  releaseAudioInput();
   startBtn.disabled=false;
   startBtn.textContent='▶ カメラ起動';
   stopBtn.disabled=true;
@@ -740,7 +788,8 @@ async function stopApp(){
   chartState.viewEnd=null;
   reviewingFrame=true;
   drawNiceChart();
-  status.textContent='カメラを停止しました。記録済みデータは保持しています。';
+  sourceInfo.textContent='入力: 未選択';
+  status.textContent='映像入力を停止しました。記録済みデータは保持しています。';
 }
 async function restartCamera(){
   stopCamera();
@@ -749,7 +798,7 @@ async function restartCamera(){
 }
 /* タブ切替での安全化 */
 document.addEventListener('visibilitychange', async ()=>{
-  if(!running) return;
+  if(!running || inputSourceState.type!=='camera') return;
   if(document.hidden){ stopCamera(); }
   else { await restartCamera(); }
 });
@@ -916,9 +965,12 @@ chart.addEventListener('click', async e=>{
 });
 
 /* ===== FPS（映像） ===== */
+let videoMeterToken=0;
 function meterVideo(){
+  const token=++videoMeterToken;
   if('requestVideoFrameCallback' in HTMLVideoElement.prototype){
     const onF=()=>{
+      if(token!==videoMeterToken || !running) return;
       vCount++; const now=performance.now();
       if(now-lastV>1000){ vfpsEl.textContent=(vCount*1000/(now-lastV)).toFixed(0); vCount=0; lastV=now; }
       vid.requestVideoFrameCallback(onF);
@@ -1029,6 +1081,7 @@ function resumeMediaClock(){
   }
 }
 function currentMediaTime(){
+  if(inputSourceState.type==='file' && Number.isFinite(vid.currentTime)) return vid.currentTime;
   if(!mediaRecordState.startPerf || !anyRecorderActive()) return '';
   return mediaElapsedSeconds();
 }
@@ -1060,7 +1113,7 @@ function updateRecordBadges(){
   audioRecInfo.className='recInfo '+(aState==='recording'?'active':(aState==='paused'?'paused':((mediaRecordState.audioBlob||mediaRecordState.audioSegments.length)?'saved':'')));
   if(saveVideoBtn) saveVideoBtn.disabled=!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length);
   if(saveAudioBtn) saveAudioBtn.disabled=!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length);
-  if(transcribeBtn) transcribeBtn.disabled=transcriptionState.busy || !(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length||mediaRecordState.audioRecorder);
+  if(transcribeBtn) transcribeBtn.disabled=transcriptionState.busy || !(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length||mediaRecordState.audioRecorder||inputSourceState.transcriptionBlob||mediaRecordState.videoBlob);
   if(saveTranscriptBtn) saveTranscriptBtn.disabled=!transcriptionState.segments.length;
 }
 function seriesForVisibleRange(data,tMin,tMax){
@@ -1470,7 +1523,15 @@ async function ensureAudio(){
   if(audioState.analyser) return true;
   if(audioState.error) return false;
   try{
-    audioState.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+    if(inputSourceState.type==='file'){
+      const captured=vid.captureStream?.() || vid.mozCaptureStream?.();
+      const tracks=captured?.getAudioTracks?.() || [];
+      if(!tracks.length) throw new Error('この動画の音声トラックをリアルタイム取得できません。文字起こしはMP4ファイルから直接実行できます。');
+      audioState.stream=new MediaStream(tracks);
+      inputSourceState.hasAudio=true;
+    }else{
+      audioState.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+    }
     audioState.ctx=new (window.AudioContext||window.webkitAudioContext)();
     const src=audioState.ctx.createMediaStreamSource(audioState.stream);
     audioState.analyser=audioState.ctx.createAnalyser();
@@ -1480,9 +1541,21 @@ async function ensureAudio(){
     return true;
   }catch(e){
     audioState.error=e;
-    status.textContent='マイクを開始できません: '+(e.message||e);
+    status.textContent=(inputSourceState.type==='file'?'動画音声を解析できません: ':'マイクを開始できません: ')+(e.message||e);
     return false;
   }
+}
+function releaseAudioInput(){
+  try{ audioState.stream?.getTracks?.().forEach(t=>t.stop()); }catch{}
+  try{ audioState.ctx?.close?.(); }catch{}
+  audioState.ctx=null;
+  audioState.analyser=null;
+  audioState.data=null;
+  audioState.stream=null;
+  audioState.last=null;
+  audioState.error=null;
+  audioState.noiseDb=-62;
+  audioState.speechUntil=0;
 }
 function readAudioMetrics(){
   if(!(plotSpeechChk.checked || plotVolumeChk.checked || recordAudioChk.checked) || !audioState.analyser) return audioState.last;
@@ -1570,6 +1643,8 @@ async function stopVideoRecording(){
 }
 async function startAudioRecording(){
   if(mediaRecordState.audioRecorder) return;
+  inputSourceState.transcriptionBlob=inputSourceState.type==='file' ? inputSourceState.file : null;
+  inputSourceState.transcriptionKind=inputSourceState.transcriptionBlob ? 'video' : '';
   await ensureAudio();
   if(!audioState.stream) return;
   const mime=bestMime(['audio/webm;codecs=opus','audio/webm']);
@@ -1643,6 +1718,8 @@ async function resetRecordings(){
   mediaRecordState.audioSegments=[];
   mediaRecordState.videoSegmentStart=0;
   mediaRecordState.audioSegmentStart=0;
+  inputSourceState.transcriptionBlob=inputSourceState.type==='file' ? inputSourceState.file : null;
+  inputSourceState.transcriptionKind=inputSourceState.transcriptionBlob ? 'video' : '';
   if(!hasVideoRecorder) mediaRecordState.discardVideoOnStop=false;
   if(!hasAudioRecorder) mediaRecordState.discardAudioOnStop=false;
   mediaRecordState.startPerf=0;
@@ -1873,11 +1950,21 @@ async function transcribeRecordedAudio(){
   if(transcriptionState.busy) return;
   transcriptionState.selectedKey=asrModelSel.value in ASR_MODELS?asrModelSel.value:'base';
   const shouldResume=running && !paused && recordAudioChk.checked && !!mediaRecordState.audioRecorder;
+  const resumeFilePlayback=running && !paused && inputSourceState.type==='file' && !vid.ended;
+  if(resumeFilePlayback){
+    paused=true;
+    vid.pause();
+    pauseBtn.textContent='● 記録開始';
+  }
   if(mediaRecordState.audioRecorder) await stopAudioRecording();
-  const sources=mediaRecordState.audioSegments.length
-    ? mediaRecordState.audioSegments.map(s=>({blob:s.blob,offset:s.start}))
-    : (mediaRecordState.audioBlob ? [{blob:mediaRecordState.audioBlob,offset:0}] : []);
-  if(!sources.length){ alert('文字起こしできる録音がありません'); return; }
+  const fallbackVideoAudio = mediaRecordState.videoBlob?.type?.startsWith('video/') ? mediaRecordState.videoBlob : null;
+  const sources=inputSourceState.transcriptionBlob
+    ? [{blob:inputSourceState.transcriptionBlob,offset:0}]
+    : (mediaRecordState.audioSegments.length
+      ? mediaRecordState.audioSegments.map(s=>({blob:s.blob,offset:s.start}))
+      : (mediaRecordState.audioBlob ? [{blob:mediaRecordState.audioBlob,offset:0}]
+        : (fallbackVideoAudio ? [{blob:fallbackVideoAudio,offset:0}] : [])));
+  if(!sources.length){ alert('文字起こしできる録音または動画音声がありません'); return; }
   transcriptionState.busy=true;
   asrModelSel.disabled=true;
   transcriptionState.segments=[];
@@ -1955,13 +2042,20 @@ async function transcribeRecordedAudio(){
     transcriptionState.error=e;
     whisperInfo.textContent='文字起こし失敗';
     const msg=String(e?.message||e);
-    status.textContent=/TransposeDQWeights|Missing required scale|create a session/i.test(msg)
+    status.textContent=/EncodingError|Unable to decode audio|decodeAudioData/i.test(msg)
+      ? 'MP4の音声を読み取れませんでした。動画に音声トラックがあるか、AACなどChromeが再生できる音声形式か確認してください。'
+      : /TransposeDQWeights|Missing required scale|create a session/i.test(msg)
       ? '文字起こしモデルの起動に失敗しました。大型モデルの場合はWhisper Base Q8へ変更して、もう一度お試しください。'
       : '文字起こしに失敗しました: '+msg;
   }finally{
     transcriptionState.busy=false;
     asrModelSel.disabled=false;
     if(shouldResume) await startAudioRecording();
+    if(resumeFilePlayback && running && inputSourceState.type==='file'){
+      paused=false;
+      pauseBtn.textContent='■ 記録停止';
+      try{ await vid.play(); }catch{}
+    }
     updateRecordBadges();
   }
 }
@@ -2420,9 +2514,9 @@ function drawPreviewFromView(sx,sy,sw,sh){
 
 /* ===== rAF描画 ===== */
 let drag = null;
-function drawLoop(){
-  if(!running) return;
-  if(paused && reviewingFrame){ requestAnimationFrame(drawLoop); return; }
+function drawLoop(generation=drawLoopGeneration){
+  if(!running || generation!==drawLoopGeneration) return;
+  if(paused && reviewingFrame){ requestAnimationFrame(()=>drawLoop(generation)); return; }
   vctx.drawImage(vid,0,0,view.width,view.height);
 
   // ドラッグ中の選択枠
@@ -2460,7 +2554,7 @@ function drawLoop(){
     boxInfo.textContent = (wantId!=='auto') ? `box: #${wantId}（不在）` : 'box: –';
   }
 
-  requestAnimationFrame(drawLoop);
+  requestAnimationFrame(()=>drawLoop(generation));
 }
 
 /* ===== 推論/追跡ループ ===== */
@@ -2750,6 +2844,93 @@ function desiredInferInterval(){
 }
 
 /* ===== 起動/操作 ===== */
+function enableAnalysisControls(){
+  startBtn.disabled=false;
+  startBtn.textContent=inputSourceState.type==='file'?'■ 動画停止':'■ カメラ停止';
+  stopBtn.disabled=true;
+  pauseBtn.disabled=false;
+  pauseBtn.textContent='■ 記録停止';
+  resetBtn.disabled=false;
+  dlBtn.disabled=false;
+  modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false; emoMethodSel.disabled=false;
+  plotHeadChk.disabled=false; plotMouthChk.disabled=false; plotSpeechChk.disabled=false; plotVolumeChk.disabled=false;
+  recordVideoChk.disabled=inputSourceState.type==='file';
+  recordAudioChk.disabled=false;
+  buildClassSelectFor(modeSel.value);
+  updateRecordBadges();
+}
+async function startAnalysisLoops(){
+  running=true;
+  paused=false;
+  reviewingFrame=false;
+  enableAnalysisControls();
+  meterVideo();
+  await ort.env.ready;
+  if(modeSel.value==='coco11' && !coco11Session){
+    coco11Session=await ort.InferenceSession.create(COCO11_MODEL_PATH,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
+  }
+  const generation=++drawLoopGeneration;
+  requestAnimationFrame(()=>drawLoop(generation));
+  await resumeOrStartMediaRecorders();
+  if(inferTimer) clearInterval(inferTimer);
+  inferTimer=setInterval(async ()=>{
+    if(paused || inferBusy || vid.readyState<2 || vid.ended) return;
+    const now=performance.now();
+    if(now-lastInferAt<desiredInferInterval()) return;
+    lastInferAt=now;
+    inferBusy=true;
+    try{ await doInferenceOnce(); }
+    catch(e){ console.error(e); status.textContent='推論エラー: '+(e.message||e); }
+    finally{ inferBusy=false; }
+  },35);
+  if(chartTimer) clearInterval(chartTimer);
+  chartTimer=setInterval(()=>{ updateRecordBadges(); if(!paused) drawNiceChart(); },180);
+}
+async function loadVideoForAnalysis(file){
+  if(running || camStream) await stopApp();
+  releaseAudioInput();
+  inputSourceState.type='file';
+  inputSourceState.file=file;
+  inputSourceState.ended=false;
+  inputSourceState.hasAudio=null;
+  inputSourceState.transcriptionBlob=file;
+  inputSourceState.transcriptionKind='video';
+  inputSourceState.objectUrl=URL.createObjectURL(file);
+  mediaRecordState.videoBlob=file;
+  mediaRecordState.videoSegments=[];
+  if(mediaRecordState.videoUrl){ URL.revokeObjectURL(mediaRecordState.videoUrl); mediaRecordState.videoUrl=null; }
+  vid.srcObject=null;
+  vid.src=inputSourceState.objectUrl;
+  vid.playsInline=true;
+  vid.muted=false;
+  await new Promise((resolve,reject)=>{
+    const done=()=>{ cleanup(); resolve(); };
+    const fail=()=>{ cleanup(); reject(new Error('動画を読み込めません。MP4/H.264などChromeで再生できる形式を使用してください。')); };
+    const cleanup=()=>{ vid.removeEventListener('loadedmetadata',done); vid.removeEventListener('error',fail); };
+    vid.addEventListener('loadedmetadata',done,{once:true});
+    vid.addEventListener('error',fail,{once:true});
+    if(vid.readyState>=1) done();
+  });
+  inputSourceState.duration=Number.isFinite(vid.duration)?vid.duration:0;
+  const scale=Math.min(1,960/Math.max(1,vid.videoWidth||960));
+  W=Math.max(1,Math.round((vid.videoWidth||640)*scale));
+  H=Math.max(1,Math.round((vid.videoHeight||360)*scale));
+  view.width=W; view.height=H;
+  recChk.checked=true;
+  sourceInfo.textContent=`入力: ${file.name} / ${inputSourceState.duration.toFixed(1)}秒`;
+  let autoplayMuted=false;
+  try{
+    await vid.play();
+  }catch(e){
+    vid.muted=true;
+    autoplayMuted=true;
+    await vid.play();
+  }
+  await startAnalysisLoops();
+  status.textContent=autoplayMuted
+    ? '動画解析を開始しました。自動再生制限により消音中ですが、文字起こしはMP4音声から直接実行できます。'
+    : 'MP4の解析を開始しました。顔・表情・顔向き・口の開きを記録し、［文字起こし］で動画音声も分析できます。';
+}
 startBtn.onclick = async ()=>{
   if(running || camStream){
     await stopApp();
@@ -2758,40 +2939,11 @@ startBtn.onclick = async ()=>{
   try{
     startBtn.disabled=true;
     status.textContent='カメラの許可を確認しています…';
+    inputSourceState.type='camera';
+    releaseAudioInput();
     await openCamera();
-    running=true; paused=false;
-    startBtn.disabled=false; startBtn.textContent='■ カメラ停止'; stopBtn.disabled=true; pauseBtn.disabled=false; pauseBtn.textContent='■ 記録停止'; resetBtn.disabled=false; dlBtn.disabled=false;
-    saveVideoBtn.disabled=!(mediaRecordState.videoBlob||mediaRecordState.videoSegments.length);
-    saveAudioBtn.disabled=!(mediaRecordState.audioBlob||mediaRecordState.audioSegments.length);
-    modeSel.disabled=false; clsSel.disabled=false; idSel.disabled=false; recChk.disabled=false; emoMethodSel.disabled=false;
-    plotHeadChk.disabled=false; plotMouthChk.disabled=false; plotSpeechChk.disabled=false; plotVolumeChk.disabled=false;
-    recordVideoChk.disabled=false; recordAudioChk.disabled=false;
-
-    buildClassSelectFor(modeSel.value);
-    meterVideo();
-
-    await ort.env.ready;
-    if(modeSel.value==='coco11' && !coco11Session){
-      coco11Session = await ort.InferenceSession.create(COCO11_MODEL_PATH,{ executionProviders:['wasm'], graphOptimizationLevel:'all' });
-    }
-    // YOLO26は選択後の最初の推論時に1回だけ遅延読込する。
+    await startAnalysisLoops();
     status.textContent='';
-
-    requestAnimationFrame(drawLoop);
-    await resumeOrStartMediaRecorders();
-    if(inferTimer) clearInterval(inferTimer);
-    inferTimer = setInterval(async ()=>{
-      if(paused || inferBusy) return;
-      const now=performance.now();
-      if(now-lastInferAt < desiredInferInterval()) return;
-      lastInferAt=now;
-      inferBusy=true;
-      try { await doInferenceOnce(); }
-      catch(e){ console.error(e); status.textContent='推論エラー: '+(e.message||e); }
-      finally { inferBusy=false; }
-    }, 35);
-    if(chartTimer) clearInterval(chartTimer);
-    chartTimer = setInterval(()=>{ updateRecordBadges(); if(!paused) drawNiceChart(); }, 180);
   }catch(e){
     console.error(e);
     stopCamera();
@@ -2813,6 +2965,7 @@ pauseBtn.onclick = async ()=>{
   paused=!paused;
   pauseBtn.textContent = paused ? '● 記録開始' : '■ 記録停止';
   if(paused){
+    if(inputSourceState.type==='file') vid.pause();
     await pauseMediaRecorders();
     chartState.viewEnd = null;
     status.textContent='記録停止中：グラフをドラッグ/ホイールで過去へ移動、クリックで録画フレームを表示できます。';
@@ -2820,10 +2973,25 @@ pauseBtn.onclick = async ()=>{
   }else{
     reviewingFrame=false;
     chartState.viewEnd=null;
+    if(inputSourceState.type==='file'){
+      if(vid.ended || inputSourceState.ended){ vid.currentTime=0; inputSourceState.ended=false; }
+      try{ await vid.play(); }catch{}
+    }
     await resumeOrStartMediaRecorders();
     doInferenceOnce(); drawNiceChart();
   }
 };
+vid.addEventListener('ended', async ()=>{
+  if(inputSourceState.type!=='file' || !running) return;
+  paused=true;
+  inputSourceState.ended=true;
+  pauseBtn.textContent='● 記録開始';
+  await pauseMediaRecorders();
+  chartState.viewEnd=null;
+  reviewingFrame=true;
+  drawNiceChart();
+  status.textContent='動画の末尾まで解析しました。［文字起こし］で音声を解析、CSV保存で結果を書き出せます。';
+});
 resetBtn.onclick = async ()=>{
   await resetRecordings();
   resetData();
@@ -2858,7 +3026,11 @@ saveVideoBtn.onclick = async ()=>{
   await stopVideoRecording();
   const blob=combinedVideoBlob();
   if(!blob){ alert('保存できる録画がありません'); return; }
-  downloadBlob(blob,'camera_record.webm');
+  const isMp4=/mp4/i.test(blob.type||'') || /\.mp4$/i.test(blob.name||'');
+  const saveName=(blob===inputSourceState.transcriptionBlob && inputSourceState.transcriptionKind==='video' && inputSourceState.file?.name)
+    ? inputSourceState.file.name
+    : `camera_record.${isMp4?'mp4':'webm'}`;
+  downloadBlob(blob,saveName);
   if(shouldResume) await startVideoRecording();
   status.textContent='録画ファイルを保存しました。';
 };
@@ -2951,19 +3123,30 @@ loadCsvInput.addEventListener('change', async e=>{
   status.textContent=`CSVを読み込みました（${series.length}点）。録画/録音も読み込むと、グラフクリックで約3秒再生できます。`;
   e.target.value='';
 });
-loadVideoInput.addEventListener('change', e=>{
+loadVideoInput.addEventListener('change', async e=>{
   const file=e.target.files?.[0]; if(!file) return;
-  mediaRecordState.videoBlob=file;
-  mediaRecordState.videoSegments=[];
-  if(mediaRecordState.videoUrl){ URL.revokeObjectURL(mediaRecordState.videoUrl); mediaRecordState.videoUrl=null; }
-  updateRecordBadges();
-  status.textContent='録画ファイルを読み込みました。停止中にグラフをクリックすると約3秒再生します。';
-  e.target.value='';
+  loadVideoBtn.disabled=true;
+  status.textContent='動画を読み込み、解析入力を準備しています…';
+  try{
+    await loadVideoForAnalysis(file);
+    updateRecordBadges();
+  }catch(error){
+    console.error('動画解析の開始に失敗しました',error);
+    await stopApp();
+    mediaRecordState.videoBlob=file;
+    updateRecordBadges();
+    status.textContent='動画解析を開始できません: '+(error?.message||error);
+  }finally{
+    loadVideoBtn.disabled=false;
+    e.target.value='';
+  }
 });
 loadAudioInput.addEventListener('change', e=>{
   const file=e.target.files?.[0]; if(!file) return;
   mediaRecordState.audioBlob=file;
   mediaRecordState.audioSegments=[];
+  inputSourceState.transcriptionBlob=file;
+  inputSourceState.transcriptionKind='audio';
   if(mediaRecordState.audioUrl){ URL.revokeObjectURL(mediaRecordState.audioUrl); mediaRecordState.audioUrl=null; }
   updateRecordBadges();
   status.textContent='録音ファイルを読み込みました。停止中にグラフをクリックすると約3秒再生します。';
